@@ -9,7 +9,7 @@ import os
 class LLMUnavailable(RuntimeError):
     pass
 
-CALL_COUNTER = {"calls": 0}
+CALL_COUNTER = {"calls": 0, "last_usage": None}
 
 def complete(system: str, user: str, model: str = "claude-sonnet-4-6") -> str:
     CALL_COUNTER["calls"] += 1
@@ -25,4 +25,12 @@ def complete(system: str, user: str, model: str = "claude-sonnet-4-6") -> str:
         model=model, max_tokens=4000, temperature=0,
         system=system, messages=[{"role": "user", "content": user}],
     )
+    usage = getattr(resp, "usage", None)
+    CALL_COUNTER["last_usage"] = {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "method": "provider_usage",
+        "exact": True,
+        "model": model,
+    }
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")

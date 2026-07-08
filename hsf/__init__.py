@@ -1,6 +1,7 @@
-"""HSF — Harness Software Factory.
+"""HSF - Harness Software Factory.
 
-Compiled AI: one model (or template) invocation per workflow *type*,
+Compiled AI: one model (or template) invocation per workflow type,
 zero model calls per transaction, four validation gates, LTAP receipts.
 """
-__version__ = "0.1.0"
+
+__version__ = "0.3.1"

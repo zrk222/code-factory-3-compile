@@ -9,7 +9,20 @@ def test_aku_export_has_seven_parts_and_autonomy(spec_and_sha, tmp_path):
 
     spec, sha = spec_and_sha
     receipt = tmp_path / "receipt.json"
-    receipt.write_text(json.dumps({"shipped": True}), encoding="utf-8")
+    receipt.write_text(
+        json.dumps(
+            {
+                "shipped": True,
+                "gates": [
+                    {"gate": "security", "passed": True},
+                    {"gate": "syntax", "passed": True},
+                    {"gate": "execution", "passed": True},
+                    {"gate": "accuracy", "passed": True},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     aku = export_aku(spec, sha, receipt)
     out = write_aku(aku, tmp_path / "glp1.aku.json")
@@ -28,6 +41,19 @@ def test_aku_export_has_seven_parts_and_autonomy(spec_and_sha, tmp_path):
     assert data["autonomy"] == "autonomous"
     assert data["governance"]["runtime_model_calls"] == 0
     assert "deterministic_branch_logic" in data["validators"]["invariant"]
+
+
+def test_aku_validator_gate_blocks_false_autonomy(spec_and_sha, tmp_path):
+    from hsf.aku import validate_aku
+
+    spec, _ = spec_and_sha
+    receipt = tmp_path / "thin_receipt.json"
+    receipt.write_text(json.dumps({"shipped": True}), encoding="utf-8")
+
+    result = validate_aku(spec, receipt, require_autonomous=True)
+    assert result["passed"] is False
+    assert result["gate"] == "aku_validators"
+    assert any(f["code"] == "AKU_POST_GATES" for f in result["findings"])
 
 
 def test_aku_cli_writes_file(tmp_path):

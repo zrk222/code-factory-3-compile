@@ -103,6 +103,22 @@ def compile_spec(spec: SpecModel, spec_sha: str, engine: str = "template") -> tu
     canary = secrets.token_urlsafe(32)
     meta = {"engine": engine, "canary": canary, "template_version": TEMPLATE_VERSION,
             "compiled_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    meta["token_meter"] = {
+        "compile": {
+            "model_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "exact": True,
+            "method": "static_template",
+        },
+        "runtime": {
+            "model_calls_per_tx": 0,
+            "tokens_per_tx": 0,
+            "exact": True,
+            "method": "compiled_static_code",
+        },
+    }
     # LSP-style closed-world check happens for activity steps regardless of engine
     from hsf.context.lsp_resolver import resolve_signatures
     acts = [s.activity for s in spec.steps if s.type == "activity" and s.activity]
@@ -111,10 +127,34 @@ def compile_spec(spec: SpecModel, spec_sha: str, engine: str = "template") -> tu
     if engine == "template":
         return render_artifact(spec, spec_sha, engine), meta
     if engine == "llm":
-        from .llm_client import complete
+        from .llm_client import CALL_COUNTER, complete
         system = (Path(__file__).parent / "prompts" / "system_v1.txt").read_text().format(canary=canary)
         skeleton = render_artifact(spec, spec_sha, engine)
-        out = complete(system, f"SPEC SHA {spec_sha}\nTEMPLATE (authoritative structure):\n{skeleton}")
+        user_prompt = f"SPEC SHA {spec_sha}\nTEMPLATE (authoritative structure):\n{skeleton}"
+        out = complete(system, user_prompt)
+        usage = CALL_COUNTER.get("last_usage") or {}
+        if usage:
+            meta["token_meter"]["compile"] = {
+                "model_calls": 1,
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "total_tokens": usage["input_tokens"] + usage["output_tokens"],
+                "exact": usage["exact"],
+                "method": usage["method"],
+                "model": usage["model"],
+            }
+        else:
+            from hsf.telemetry import count_tokens
+            counted = count_tokens(system + "\n" + user_prompt)
+            meta["token_meter"]["compile"] = {
+                "model_calls": 1,
+                "input_tokens": counted.tokens,
+                "output_tokens": 0,
+                "total_tokens": counted.tokens,
+                "exact": counted.exact,
+                "method": counted.method,
+                "encoding": counted.encoding,
+            }
         src = out.strip()
         if src.startswith("```"):
             src = src.strip("`\n")

@@ -9,6 +9,11 @@
   `autonomous`, derived from validator coverage and shipped receipt history.
 - `hsf topology`: validate workflow topology manifests for dangling links and
   cycles before agents rely on them.
+- `hsf meter`: report per-module context tokens with exact/estimated
+  provenance, then write those fields into compile receipts.
+- AKU validator triad as an executable gate via
+  `hsf aku --require-autonomous`.
+- Worked end-to-end example path in `examples/end_to_end/`.
 
 ## v0.2 (shipped)
 

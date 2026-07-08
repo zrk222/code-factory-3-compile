@@ -7,8 +7,10 @@ dist/
 .venv/
 venv/
 .factory/
+.forge/
 audit/
 receipts/
 registry_store/
+examples/end_to_end/*.aku.json
 *.zip
 .DS_Store

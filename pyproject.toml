@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-factory-3-compile"
-version = "0.3.0"
-description = "HSF — Harness Software Factory: compile declarative workflow specs into deterministic, gate-validated Python artifacts (Compiled AI with an LTAP factory gate)."
+version = "0.3.1"
+description = "HSF - Harness Software Factory: compile declarative workflow specs into deterministic, gate-validated Python artifacts with receipt-backed token metering."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -15,13 +15,24 @@ dependencies = ["pydantic>=2.5", "PyYAML>=6.0", "jinja2>=3.1"]
 llm = ["anthropic>=0.34"]
 serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 guards = ["bandit>=1.7", "presidio-analyzer>=2.2"]
+tokens = ["tiktoken>=0.7"]
 dev = ["pytest>=8.0", "mypy>=1.8"]
+all = ["anthropic>=0.34", "fastapi>=0.110", "uvicorn>=0.29", "bandit>=1.7", "presidio-analyzer>=2.2", "tiktoken>=0.7"]
 
 [project.scripts]
 hsf = "hsf.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hsf*"]
+
+[tool.setuptools.package-data]
+hsf = [
+  "context/library/concepts/*.md",
+  "context/library/contracts/*.yaml",
+  "context/library/templates/*.j2",
+  "foundry/prompts/*.txt",
+  "runtime/extractor_prompts/*.txt",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

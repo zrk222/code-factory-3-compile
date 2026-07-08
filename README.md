@@ -71,6 +71,17 @@ not comments. Every build produces a receipt; no receipt, not shipped.
 ## Quickstart (no API key needed)
 
 ```bash
+python -m pip install code-factory-3-compile
+# or, for an isolated CLI:
+pipx install code-factory-3-compile
+
+hsf --help
+python -m hsf --help
+```
+
+For local development from a checkout:
+
+```bash
 pip install -e ".[dev]"
 hsf validate specs/glp1_review.yaml
 hsf compile  specs/glp1_review.yaml          # deterministic template engine
@@ -80,8 +91,25 @@ hsf run registry_store/glp1_review-*.py \
 hsf goldens registry_store/glp1_review-*.py glp1_review   # 40/40 required
 hsf aku specs/glp1_review.yaml -o glp1_review.aku.json    # seven-part AKU export
 hsf topology topology.yaml                                # validate workflow graph
+hsf meter                                                 # per-module token meter
 hsf bench --compile-tokens 34000              # n* ≈ 17 break-even
 pytest -q                                     # 63 tests
+```
+
+Optional extras:
+
+```bash
+python -m pip install "code-factory-3-compile[serve]"   # hsf serve
+python -m pip install "code-factory-3-compile[tokens]"  # exact tiktoken meter
+python -m pip install "code-factory-3-compile[llm]"     # Anthropic compile engine
+```
+
+PowerShell does not always expand wildcards the same way Unix shells do, so the
+CLI accepts globs directly:
+
+```powershell
+hsf goldens "registry_store/glp1_review-*.py" glp1_review
+hsf aku specs/glp1_review.yaml --receipt "receipts/glp1_review-*.receipt.json"
 ```
 
 Two compile engines, identical gates:
@@ -106,6 +134,20 @@ Two compile engines, identical gates:
 receipt JSON containing the spec sha, artifact sha, **doctrine hash**
 (sha256 over the context library + gate code), per-gate evidence, and the
 shipped verdict. Claims derive from receipts, never hand-copied prose.
+
+Receipts also include a `token_meter` section:
+
+- `compile`: generation-plane model calls and compile tokens. Template mode is
+  recorded as zero model calls and zero compile tokens.
+- `runtime`: per-transaction model calls and tokens. Compiled artifacts record
+  zero runtime tokens.
+- `context_modules`: per-module context token density for concepts, contracts,
+  and templates.
+- `savings`: break-even and TCO math derived from the measured meter fields.
+
+If `pip install .[tokens]` is installed, token counts use `tiktoken` and are
+marked exact. Without it, counts are marked `chars_per_token_estimate`; the
+receipt says that plainly so estimated savings are never presented as measured.
 
 ## Runtime invariants
 
@@ -152,6 +194,27 @@ The export also classifies the governance gradient as `human_controlled`,
 `supervised`, or `autonomous` based on validator coverage and shipped receipt
 history. `hsf topology` validates AKU routing manifests so workflow graphs do
 not ship with dangling links or cycles.
+
+`hsf aku --require-autonomous --receipt receipts/<id>.receipt.json` turns the
+AKU validator triad into a real gate. It fails unless preconditions,
+postconditions, and invariants are all represented by a shipped receipt with
+the four factory gates passing. A bare `{"shipped": true}` is not enough
+evidence.
+
+## Worked end-to-end example
+
+See `examples/end_to_end/` for a complete `refund_review` run:
+
+```bash
+hsf validate specs/refund_review.yaml
+hsf compile specs/refund_review.yaml
+hsf goldens registry_store/refund_review-*.py refund_review
+hsf aku specs/refund_review.yaml --receipt receipts/refund_review-*.receipt.json --require-autonomous
+hsf meter
+```
+
+The example is there for reviewers who want to see the factory operate once
+from spec to receipt to AKU before adopting it.
 
 ## License
 

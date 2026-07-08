@@ -1,0 +1,15 @@
+nodes:
+  - id: refund_review_spec
+  - id: foundry_compile
+  - id: factory_gates
+  - id: signed_artifact
+  - id: aku_receipt
+edges:
+  - from: refund_review_spec
+    to: foundry_compile
+  - from: foundry_compile
+    to: factory_gates
+  - from: factory_gates
+    to: signed_artifact
+  - from: signed_artifact
+    to: aku_receipt

@@ -26,3 +26,22 @@ def entropy_check(outputs: list[dict]) -> str:
     if len(hashes) > 1:
         raise DeterminismViolation(f"entropy detected: {len(hashes)} distinct outputs")
     return next(iter(hashes)) if hashes else ""
+
+def token_savings(*, compile_input_tokens: int, compile_output_tokens: int = 0,
+                  runtime_tokens_per_tx: int = 0,
+                  interpretive_tokens_per_tx: int = 2000,
+                  price_per_1k: float = 0.01) -> dict:
+    fixed = compile_input_tokens + compile_output_tokens
+    modeled = break_even(
+        compile_tokens=fixed,
+        interpretive_tokens_per_tx=interpretive_tokens_per_tx,
+        runtime_tokens_per_tx=runtime_tokens_per_tx,
+        price_per_1k=price_per_1k,
+    )
+    modeled["compile_input_tokens"] = compile_input_tokens
+    modeled["compile_output_tokens"] = compile_output_tokens
+    modeled["compile_total_tokens"] = fixed
+    modeled["runtime_tokens_per_tx"] = runtime_tokens_per_tx
+    modeled["interpretive_tokens_per_tx"] = interpretive_tokens_per_tx
+    modeled["price_per_1k"] = price_per_1k
+    return modeled

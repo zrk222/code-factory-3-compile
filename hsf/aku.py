@@ -8,6 +8,7 @@ from typing import Literal
 
 import yaml
 
+from hsf.gates.g5_aku import run as run_aku_validator_gate
 from hsf.spec.models import SpecModel
 
 Autonomy = Literal["human_controlled", "supervised", "autonomous"]
@@ -65,7 +66,14 @@ def classify_autonomy(coverage: ValidatorCoverage, receipt: dict | None = None) 
     has_post = bool(coverage.post)
     has_invariant = bool(coverage.invariant)
     shipped = bool(receipt and receipt.get("shipped") is True)
-    if has_pre and has_post and has_invariant and shipped:
+    passed_gates = {
+        g.get("gate")
+        for g in (receipt or {}).get("gates", [])
+        if isinstance(g, dict) and g.get("passed") is True
+    }
+    expected_gates = {"security", "syntax", "execution", "accuracy"}
+    receipt_proves_gates = expected_gates <= passed_gates
+    if has_pre and has_post and has_invariant and shipped and receipt_proves_gates:
         return "autonomous"
     if has_pre and has_post:
         return "supervised"
@@ -78,6 +86,7 @@ def export_aku(spec: SpecModel, spec_sha: str, receipt_path: str | Path | None =
         receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
 
     coverage = validator_coverage(spec, receipt)
+    validator_gate = run_aku_validator_gate(spec, receipt, require_autonomous=False)
     procedure = [
         f"Load workflow spec {spec.workflow_spec} v{spec.version}.",
         "Validate schema, step references, branch exhaustiveness, and compliance tags.",
@@ -117,8 +126,17 @@ def export_aku(spec: SpecModel, spec_sha: str, receipt_path: str | Path | None =
             "escalation": "human review for ambiguous or out-of-policy inputs",
         },
         validators=coverage,
-        autonomy=classify_autonomy(coverage, receipt),
+        autonomy="autonomous" if validator_gate.evidence["autonomy_ready"] else classify_autonomy(coverage, receipt),
     )
+
+
+def validate_aku(spec: SpecModel, receipt_path: str | Path | None = None,
+                 *, require_autonomous: bool = False) -> dict:
+    receipt = None
+    if receipt_path:
+        receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+    result = run_aku_validator_gate(spec, receipt, require_autonomous=require_autonomous)
+    return result.summary() | {"evidence": result.evidence}
 
 
 def write_aku(aku: AtomicKnowledgeUnit, output: str | Path) -> Path:

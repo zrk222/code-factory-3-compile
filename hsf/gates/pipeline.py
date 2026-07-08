@@ -12,6 +12,7 @@ from pathlib import Path
 from . import g1_security, g2_syntax, g3_execution, g4_accuracy
 from .base import GateResult
 from hsf.context.assembler import doctrine_hash
+from hsf.telemetry import context_token_report, token_savings
 
 def run_pipeline(source: str, *, spec_schema: dict, smoke_cases: list[dict],
                  golden_cases: list[dict], canary: str | None = None,
@@ -33,6 +34,25 @@ def write_receipt(out_dir: Path, *, spec_id: str, spec_sha: str, artifact_sha: s
                   compile_meta: dict, results: list[GateResult], shipped: bool) -> Path:
     """LTAP Update+Audit: receipt-owned evidence; no hand-copied metrics."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    meter = {
+        "compile": {
+            "model_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "exact": True,
+            "method": "unspecified_static",
+        },
+        "runtime": {
+            "model_calls_per_tx": 0,
+            "tokens_per_tx": 0,
+            "exact": True,
+            "method": "compiled_static_code",
+        },
+        **compile_meta.get("token_meter", {}),
+    }
+    compile_tokens = int(meter.get("compile", {}).get("total_tokens", 0) or 0)
+    runtime_tokens = int(meter.get("runtime", {}).get("tokens_per_tx", 0) or 0)
     receipt = {
         "ltap": ["ingest", "decide", "act", "update", "audit"],
         "spec_id": spec_id, "spec_sha": spec_sha, "artifact_sha": artifact_sha,
@@ -41,6 +61,14 @@ def write_receipt(out_dir: Path, *, spec_id: str, spec_sha: str, artifact_sha: s
         "attempts": compile_meta.get("attempts", 1),
         "compiled_at": compile_meta.get("compiled_at"),
         "gates": [r.summary() | {"evidence": r.evidence} for r in results],
+        "token_meter": {
+            **meter,
+            "context_modules": context_token_report(),
+            "savings": token_savings(
+                compile_input_tokens=compile_tokens,
+                runtime_tokens_per_tx=runtime_tokens,
+            ),
+        },
         "shipped": shipped,
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }

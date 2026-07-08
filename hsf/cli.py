@@ -1,15 +1,45 @@
 """hsf CLI: validate | compile | run | goldens | bench  (stdlib argparse; zero extra deps)."""
 from __future__ import annotations
-import argparse, asyncio, json, sys
+import argparse, glob, json, sys
 from pathlib import Path
+
+class CliError(RuntimeError):
+    pass
+
+def _die(message: str, code: int = 2) -> None:
+    print(f"hsf: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+def _resolve_existing(path_or_glob: str, *, kind: str = "file") -> Path:
+    matches = sorted(Path(p) for p in glob.glob(path_or_glob))
+    if matches:
+        return matches[-1]
+    path = Path(path_or_glob)
+    if path.exists():
+        return path
+    hint = " Use Get-ChildItem/ls to inspect generated files, or run `hsf compile <spec>` first."
+    raise CliError(f"{kind} not found: {path_or_glob}.{hint}")
 
 def _load(spec_path):
     from hsf.spec import load_spec
-    return load_spec(spec_path)
+    return load_spec(_resolve_existing(spec_path, kind="spec"))
 
 def _goldens_for(spec_id: str, root: Path | None = None) -> list[dict]:
     p = (root or Path(".")) / "goldens" / spec_id / "cases.jsonl"
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    if not p.exists():
+        raise CliError(f"goldens not found for spec_id={spec_id!r}: {p}")
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+def _json_arg(raw: str, *, name: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"{name} must be valid JSON: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise CliError(f"{name} must decode to a JSON object")
+    return value
 
 def _schema_of(spec) -> dict:
     out = {}
@@ -31,7 +61,8 @@ def cmd_compile(args):
     from hsf.gates.pipeline import run_pipeline, write_receipt
     from hsf.registry import store_artifact
     spec, sha = _load(args.spec)
-    root = Path(args.spec).resolve().parent.parent
+    spec_path = _resolve_existing(args.spec, kind="spec")
+    root = spec_path.resolve().parent.parent
     goldens = _goldens_for(spec.workflow_spec, root)
     schema = _schema_of(spec)
     smoke = goldens[:5]
@@ -50,14 +81,16 @@ def cmd_run(args):
     from hsf.registry import verify_artifact
     from hsf.runtime import Orchestrator
     from hsf.runtime.extractor import FixtureExtractor
-    fields = json.loads(args.extracted) if args.extracted else {}
-    orch = Orchestrator(Path(args.artifact), FixtureExtractor(fields), verify=verify_artifact)
+    fields = _json_arg(args.extracted, name="--extracted")
+    artifact = _resolve_existing(args.artifact, kind="artifact")
+    orch = Orchestrator(artifact, FixtureExtractor(fields), verify=verify_artifact)
     result = orch.run({"text": args.text})
     print(json.dumps({"status": result.status, "reason": result.reason}))
 
 def cmd_goldens(args):
     from hsf.gates.g4_accuracy import run as g4
-    src = Path(args.artifact).read_text()
+    artifact = _resolve_existing(args.artifact, kind="artifact")
+    src = artifact.read_text(encoding="utf-8")
     r = g4(src, _goldens_for(args.spec_id))
     print(json.dumps(r.evidence, indent=2))
     sys.exit(0 if r.passed else 1)
@@ -74,28 +107,41 @@ def cmd_demo(args):
 
 def cmd_serve(args):
     from hsf.serve import build_app
-    import uvicorn
-    uvicorn.run(build_app(args.artifact), host=args.host, port=args.port)
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise CliError("serve requires optional dependencies: python -m pip install 'code-factory-3-compile[serve]'") from exc
+    artifact = _resolve_existing(args.artifact, kind="artifact")
+    uvicorn.run(build_app(str(artifact)), host=args.host, port=args.port)
 
 def cmd_badge(args):
     from hsf.badge import badge_from_receipt
-    print(badge_from_receipt(args.receipt))
+    print(badge_from_receipt(_resolve_existing(args.receipt, kind="receipt")))
 
 def cmd_aku(args):
-    from hsf.aku import export_aku, write_aku
+    from hsf.aku import export_aku, validate_aku, write_aku
     spec, sha = _load(args.spec)
-    aku = export_aku(spec, sha, receipt_path=args.receipt)
+    receipt = _resolve_existing(args.receipt, kind="receipt") if args.receipt else None
+    validation = validate_aku(spec, receipt_path=receipt, require_autonomous=args.require_autonomous)
+    if not validation["passed"]:
+        print(json.dumps(validation, indent=2))
+        sys.exit(1)
+    aku = export_aku(spec, sha, receipt_path=receipt)
     out = args.output or f"{spec.workflow_spec}.aku.json"
     path = write_aku(aku, out)
     print(path)
 
 def cmd_topology(args):
     from hsf.aku import validate_topology
-    print(json.dumps(validate_topology(args.manifest), indent=2))
+    print(json.dumps(validate_topology(_resolve_existing(args.manifest, kind="topology manifest")), indent=2))
 
 def cmd_bench(args):
     from hsf.telemetry import break_even
     print(json.dumps(break_even(args.compile_tokens), indent=2))
+
+def cmd_meter(args):
+    from hsf.telemetry import context_token_report
+    print(json.dumps(context_token_report(max_tokens=args.max_tokens), indent=2))
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="hsf", description="Harness Software Factory")
@@ -116,11 +162,16 @@ def main(argv=None):
     s = sub.add_parser("aku"); s.add_argument("spec")
     s.add_argument("--receipt", default=None)
     s.add_argument("-o", "--output", default=None)
+    s.add_argument("--require-autonomous", action="store_true")
     s.set_defaults(fn=cmd_aku)
     s = sub.add_parser("topology"); s.add_argument("manifest"); s.set_defaults(fn=cmd_topology)
     s = sub.add_parser("bench"); s.add_argument("--compile-tokens", type=int, default=34000); s.set_defaults(fn=cmd_bench)
+    s = sub.add_parser("meter"); s.add_argument("--max-tokens", type=int, default=32000); s.set_defaults(fn=cmd_meter)
     args = p.parse_args(argv)
-    args.fn(args)
+    try:
+        args.fn(args)
+    except CliError as exc:
+        _die(str(exc))
 
 if __name__ == "__main__":
     main()
