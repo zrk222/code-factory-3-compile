@@ -1,0 +1,37 @@
+workflow_spec: refunds_decisions
+version: 1
+metadata:
+  owner: specline
+  compliance: []
+inputs:
+  input_data:
+    text: string
+steps:
+- id: extract_facts
+  type: bounded_invocation
+  schema:
+    amount:
+      type: float
+      min: 0.0
+      max: 1000000.0
+    has_receipt: boolean
+    item_damaged: boolean
+  on_out_of_bounds: human_review
+- id: decide
+  type: branch
+  rules:
+  - if: item_damaged == true
+    then:
+      status: APPROVED
+      reason: Damaged Item
+  - if: has_receipt == true and amount < 100
+    then:
+      status: APPROVED
+      reason: Small With Receipt
+  - else:
+      status: HUMAN_REVIEW
+      reason: Manual screen
+outputs:
+  AuthResult:
+    status: enum[APPROVED, DENIED, HUMAN_REVIEW]
+    reason: string

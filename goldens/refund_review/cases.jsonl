@@ -1,0 +1,4 @@
+{"case_id": "r01", "input_text": "Damaged on arrival, $50", "extracted": {"within_return_window": false, "amount": 50.0, "item_damaged": true}, "expected": {"status": "APPROVED", "reason": "Damaged Item"}}
+{"case_id": "r02", "input_text": "Return day 10 of 30, $120", "extracted": {"within_return_window": true, "amount": 120.0, "item_damaged": false}, "expected": {"status": "APPROVED", "reason": "Within Window"}}
+{"case_id": "r03", "input_text": "Day 90, fine condition, $80", "extracted": {"within_return_window": false, "amount": 80.0, "item_damaged": false}, "expected": {"status": "DENIED", "reason": "Outside Policy"}}
+{"case_id": "r04", "input_text": "Negative amount anomaly", "extracted": {"within_return_window": true, "amount": -5.0, "item_damaged": false}, "expected": {"status": "DENIED", "reason": "Suspicious amount"}}

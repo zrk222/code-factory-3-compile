@@ -1,0 +1,26 @@
+workflow_spec: expense_approval
+version: 1
+metadata:
+  owner: rick@wizeme.app
+  compliance: []
+inputs:
+  input_data:
+    text: string
+steps:
+  - id: extract_expense
+    type: bounded_invocation
+    schema:
+      amount: {type: float, min: 0.0, max: 50000.0}
+      has_receipt: boolean
+      is_travel: boolean
+    on_out_of_bounds: human_review
+  - id: decide
+    type: branch
+    rules:
+      - if: "has_receipt == false"
+        then: {status: DENIED, reason: "Receipt Required"}
+      - if: "amount >= 1000.0"
+        then: {status: HUMAN_REVIEW, reason: "Manager Approval Required"}
+      - else: {status: APPROVED, reason: "Auto-Approved"}
+outputs:
+  AuthResult: {status: "enum[APPROVED, DENIED, HUMAN_REVIEW]", reason: string}

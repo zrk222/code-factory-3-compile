@@ -1,0 +1,4 @@
+{"case_id": "expe_00", "input_text": "synthetic case 0", "extracted": {"amount": 45.0, "has_receipt": true, "is_travel": false}, "expected": {"status": "APPROVED", "reason": "Auto-Approved"}}
+{"case_id": "expe_01", "input_text": "synthetic case 1", "extracted": {"amount": 2500.0, "has_receipt": true, "is_travel": true}, "expected": {"status": "HUMAN_REVIEW", "reason": "Manager Approval Required"}}
+{"case_id": "expe_02", "input_text": "synthetic case 2", "extracted": {"amount": 45.0, "has_receipt": false, "is_travel": false}, "expected": {"status": "DENIED", "reason": "Receipt Required"}}
+{"case_id": "expe_03", "input_text": "synthetic case 3", "extracted": {"amount": -3.0, "has_receipt": true, "is_travel": false}, "expected": {"status": "HUMAN_REVIEW", "reason": "Suspicious amount"}}

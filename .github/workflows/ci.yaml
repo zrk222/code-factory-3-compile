@@ -1,0 +1,25 @@
+﻿name: ci
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - name: end-to-end compile + goldens (template engine, no secrets)
+        run: |
+          hsf validate specs/glp1_review.yaml
+          hsf compile specs/glp1_review.yaml
+        shell: bash

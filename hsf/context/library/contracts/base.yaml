@@ -1,0 +1,10 @@
+# Layer 2 — Contracts: allowed actions and registered compliance guards
+allowed_step_types: [bounded_invocation, activity, branch, terminal]
+compliance_guards:
+  - tag: HIPAA
+    guard: no_phi_in_logs
+  - tag: CMS_Decision_Timeframes
+    guard: decision_latency_budget
+  - tag: GDPR
+    guard: erasure_supported
+forbidden_in_artifacts: [eval, exec, os.system, subprocess, socket, open_write, random, time_branching]

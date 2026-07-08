@@ -1,0 +1,26 @@
+workflow_spec: lead_scoring
+version: 1
+metadata:
+  owner: rick@wizeme.app
+  compliance: []
+inputs:
+  input_data:
+    text: string
+steps:
+  - id: extract_lead
+    type: bounded_invocation
+    schema:
+      budget_confirmed: boolean
+      decision_maker: boolean
+      timeline_days: {type: int, min: 0, max: 3650}
+    on_out_of_bounds: reject
+  - id: decide
+    type: branch
+    rules:
+      - if: "budget_confirmed == true and decision_maker == true"
+        then: {status: APPROVED, reason: "Hot Lead"}
+      - if: "budget_confirmed == true"
+        then: {status: HUMAN_REVIEW, reason: "Qualify Decision Maker"}
+      - else: {status: DENIED, reason: "Nurture Track"}
+outputs:
+  AuthResult: {status: "enum[APPROVED, DENIED, HUMAN_REVIEW]", reason: string}

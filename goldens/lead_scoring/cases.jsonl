@@ -1,0 +1,4 @@
+{"case_id": "lead_00", "input_text": "synthetic case 0", "extracted": {"budget_confirmed": true, "decision_maker": true, "timeline_days": 30}, "expected": {"status": "APPROVED", "reason": "Hot Lead"}}
+{"case_id": "lead_01", "input_text": "synthetic case 1", "extracted": {"budget_confirmed": true, "decision_maker": false, "timeline_days": 90}, "expected": {"status": "HUMAN_REVIEW", "reason": "Qualify Decision Maker"}}
+{"case_id": "lead_02", "input_text": "synthetic case 2", "extracted": {"budget_confirmed": false, "decision_maker": false, "timeline_days": 400}, "expected": {"status": "DENIED", "reason": "Nurture Track"}}
+{"case_id": "lead_03", "input_text": "synthetic case 3", "extracted": {"budget_confirmed": true, "decision_maker": true, "timeline_days": -5}, "expected": {"status": "DENIED", "reason": "Suspicious timeline_days"}}

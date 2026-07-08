@@ -1,0 +1,5 @@
+{"case_id": "cont_00", "input_text": "synthetic case 0", "extracted": {"contains_threat": true, "contains_pii": false, "toxicity": 0.2}, "expected": {"status": "DENIED", "reason": "Threat Content"}}
+{"case_id": "cont_01", "input_text": "synthetic case 1", "extracted": {"contains_threat": false, "contains_pii": true, "toxicity": 0.1}, "expected": {"status": "HUMAN_REVIEW", "reason": "PII Present"}}
+{"case_id": "cont_02", "input_text": "synthetic case 2", "extracted": {"contains_threat": false, "contains_pii": false, "toxicity": 0.9}, "expected": {"status": "DENIED", "reason": "High Toxicity"}}
+{"case_id": "cont_03", "input_text": "synthetic case 3", "extracted": {"contains_threat": false, "contains_pii": false, "toxicity": 0.1}, "expected": {"status": "APPROVED", "reason": "Clean"}}
+{"case_id": "cont_04", "input_text": "synthetic case 4", "extracted": {"contains_threat": false, "contains_pii": false, "toxicity": 1.5}, "expected": {"status": "HUMAN_REVIEW", "reason": "Suspicious toxicity"}}

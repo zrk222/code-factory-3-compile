@@ -1,0 +1,26 @@
+workflow_spec: refund_review
+version: 1
+metadata:
+  owner: rick@wizeme.app
+  compliance: []
+inputs:
+  input_data:
+    text: string
+steps:
+  - id: extract_refund_factors
+    type: bounded_invocation
+    schema:
+      within_return_window: boolean
+      amount: {type: float, min: 0.0, max: 100000.0}
+      item_damaged: boolean
+    on_out_of_bounds: reject
+  - id: decide
+    type: branch
+    rules:
+      - if: "item_damaged == true"
+        then: {status: APPROVED, reason: "Damaged Item"}
+      - if: "within_return_window == true"
+        then: {status: APPROVED, reason: "Within Window"}
+      - else: {status: DENIED, reason: "Outside Policy"}
+outputs:
+  AuthResult: {status: "enum[APPROVED, DENIED, HUMAN_REVIEW]", reason: string}

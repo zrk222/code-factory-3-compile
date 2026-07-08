@@ -1,0 +1,28 @@
+workflow_spec: content_moderation
+version: 1
+metadata:
+  owner: rick@wizeme.app
+  compliance: []
+inputs:
+  input_data:
+    text: string
+steps:
+  - id: extract_signals
+    type: bounded_invocation
+    schema:
+      contains_threat: boolean
+      contains_pii: boolean
+      toxicity: {type: float, min: 0.0, max: 1.0}
+    on_out_of_bounds: human_review
+  - id: decide
+    type: branch
+    rules:
+      - if: "contains_threat == true"
+        then: {status: DENIED, reason: "Threat Content"}
+      - if: "contains_pii == true"
+        then: {status: HUMAN_REVIEW, reason: "PII Present"}
+      - if: "toxicity >= 0.8"
+        then: {status: DENIED, reason: "High Toxicity"}
+      - else: {status: APPROVED, reason: "Clean"}
+outputs:
+  AuthResult: {status: "enum[APPROVED, DENIED, HUMAN_REVIEW]", reason: string}
