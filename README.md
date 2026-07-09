@@ -302,3 +302,13 @@ and regression-tested; the suite is now green on all three platforms.
 
 `tests/test_portability.py` locks both in — including a test that blocks the
 `resource` module to emulate Windows and proves the runner still executes.
+## Category-aware golden attribution
+
+HSF 0.4 keeps the G4 release rule unchanged: any accuracy below `1.0` blocks.
+When a golden fails, `hsf goldens` reports category rates, the deterministic
+first divergence, and a `wrong_output` failure class. Fixtures may declare
+`category`; omitted categories become `uncategorized`.
+
+Category metadata and attribution are build-time evidence only. They never
+enter generated Python, and compiling the same spec before and after attribution
+produces the same artifact SHA.

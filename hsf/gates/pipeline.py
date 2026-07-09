@@ -61,6 +61,11 @@ def write_receipt(out_dir: Path, *, spec_id: str, spec_sha: str, artifact_sha: s
         "attempts": compile_meta.get("attempts", 1),
         "compiled_at": compile_meta.get("compiled_at"),
         "gates": [r.summary() | {"evidence": r.evidence} for r in results],
+        "attribution": next(
+            (r.evidence.get("attribution") for r in results
+             if r.gate == "accuracy" and r.evidence.get("attribution")),
+            None,
+        ),
         "token_meter": {
             **meter,
             "context_modules": context_token_report(),

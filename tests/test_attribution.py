@@ -28,3 +28,26 @@ def test_category_metadata_does_not_mutate_artifact(artifact_source, goldens):
         item["category"] = "metadata-only"
     run(artifact_source, cases)
     assert hashlib.sha256(artifact_source.encode()).hexdigest() == before
+
+
+def test_execution_failure_still_has_classified_attribution(goldens):
+    result = run("raise RuntimeError('broken artifact')", goldens[:1])
+    assert result.passed is False
+    assert result.evidence["attribution"]["n_checked"] == 1
+    assert result.evidence["attribution"]["dominant_failure_class"] == "runtime_crash"
+
+
+def test_compile_sha_identical_before_and_after_attribution(spec_and_sha, goldens):
+    from hsf.foundry.compiler import compile_spec
+    spec, spec_sha = spec_and_sha
+    before_source, _ = compile_spec(spec, spec_sha, engine="template")
+    before_sha = hashlib.sha256(before_source.encode()).hexdigest()
+    categorized = deepcopy(goldens[:3])
+    for fixture in categorized:
+        fixture["category"] = "metadata-only"
+    assert run(before_source, categorized).passed
+    after_source, _ = compile_spec(spec, spec_sha, engine="template")
+    after_sha = hashlib.sha256(after_source.encode()).hexdigest()
+    assert after_sha == before_sha
+    for symbol in ("attribution", "refine", "rejection_ledger", "edit_selection"):
+        assert symbol not in after_source

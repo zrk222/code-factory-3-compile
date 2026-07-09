@@ -15,6 +15,8 @@ def test_receipt_contains_doctrine_hash_and_gate_evidence(tmp_path, artifact_sou
     assert len(r["doctrine_hash"]) == 64
     assert [g["gate"] for g in r["gates"]] == ["security", "syntax", "execution", "accuracy"]
     assert r["gates"][3]["evidence"]["accuracy"] == 1.0
+    assert r["attribution"]["rate"] == 1.0
+    assert r["attribution"]["n_checked"] == len(goldens)
     assert r["ltap"] == ["ingest", "decide", "act", "update", "audit"]
     assert r["token_meter"]["runtime"]["tokens_per_tx"] == 0
     assert "context_modules" in r["token_meter"]

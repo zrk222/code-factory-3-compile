@@ -10,7 +10,21 @@ from .g3_execution import run as _exec_run
 def run(source: str, golden_cases: list[dict]) -> GateResult:
     res = _exec_run(source, golden_cases, repeats=1)
     if not res.passed:
-        return GateResult("accuracy", False, res.findings, res.evidence)
+        evidence = dict(res.evidence)
+        attr = Attribution("accuracy", 1, 0, [
+            UnitResult(
+                "goldens:<execution>",
+                "accuracy",
+                False,
+                "compiled artifact could not execute golden fixtures: " +
+                " | ".join(f.message for f in res.findings),
+                FailureClass.RUNTIME_CRASH,
+            )
+        ])
+        evidence["attribution"] = attr.to_dict()
+        evidence["by_category"] = {}
+        evidence["first_divergence"] = None
+        return GateResult("accuracy", False, res.findings, evidence)
     # re-run to capture outputs for comparison
     import subprocess, sys, tempfile
     from pathlib import Path
