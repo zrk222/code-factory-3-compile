@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-factory-3-compile"
-version = "0.5.0"
+version = "0.5.1"
 description = "HSF - Harness Software Factory: compile declarative workflow specs into deterministic, gate-validated Python artifacts with receipt-backed token metering."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,11 +18,11 @@ Issues = "https://github.com/zrk222/code-factory-3-compile/issues"
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.34"]
-serve = ["fastapi>=0.110", "uvicorn>=0.29"]
+serve = ["fastapi>=0.110", "starlette<1.0", "uvicorn>=0.29", "httpx>=0.27"]
 guards = ["bandit>=1.7", "presidio-analyzer>=2.2"]
 tokens = ["tiktoken>=0.7"]
 dev = ["pytest>=8.0", "mypy>=1.8"]
-all = ["anthropic>=0.34", "fastapi>=0.110", "uvicorn>=0.29", "bandit>=1.7", "presidio-analyzer>=2.2", "tiktoken>=0.7"]
+all = ["anthropic>=0.34", "fastapi>=0.110", "starlette<1.0", "uvicorn>=0.29", "httpx>=0.27", "bandit>=1.7", "presidio-analyzer>=2.2", "tiktoken>=0.7"]
 
 [project.scripts]
 hsf = "hsf.cli:main"
