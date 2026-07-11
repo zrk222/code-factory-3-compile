@@ -80,6 +80,11 @@ The runtime flags `INJ_INSTRUCTION_OVERRIDE` in the audit log and still returns
 the same `DENIED` decision. The attack reaches the audit trail, not the decision
 logic, because the decision logic is already static Python.
 
+The no-secret demo intentionally uses `FixtureExtractor`: extracted fields are
+fixed so the run isolates and proves the compiled-decision boundary. It does
+not claim that a live model performed extraction. The optional
+`AnthropicExtractor` is a separate quarantined integration path.
+
 You can socially engineer an LLM. You cannot socially engineer a compiled
 function.
 
@@ -111,12 +116,13 @@ hsf compile  specs/glp1_review.yaml          # deterministic template engine
 hsf run registry_store/glp1_review-*.py \
     --text "Patient note..." \
     --extracted '{"has_t2d_diagnosis": true, "current_a1c": 7.2, "bmi": 28.0}'
-hsf goldens registry_store/glp1_review-*.py glp1_review   # 40/40 required
+hsf goldens registry_store/glp1_review-*.py glp1_review   # every golden must pass
+hsf challenge specs/glp1_review.yaml          # corrupt every decision branch; goldens must reject each mutant
 hsf aku specs/glp1_review.yaml -o glp1_review.aku.json    # seven-part AKU export
 hsf topology topology.yaml                                # validate workflow graph
 hsf meter                                                 # per-module token meter
 hsf bench --compile-tokens 34000              # n* ≈ 17 break-even
-pytest -q                                     # 63 tests
+pytest -q                                     # run the current full suite
 ```
 
 Optional extras:
@@ -148,7 +154,7 @@ Two compile engines, identical gates:
 
 | Gate | Checks | Rejects |
 |---|---|---|
-| **1 Security** | closed-world imports, forbidden calls (eval/exec/os.system/subprocess/socket), nondeterminism sources (random, time-branching, env reads), file writes, canary leak, input injection scan | 20-fixture vuln set: 100% precision, ≥75% recall in CI |
+| **1 Security** | closed-world imports, forbidden calls (eval/exec/os.system/subprocess/socket), nondeterminism sources (random, time-branching, env reads), file writes, canary leak, input injection scan | malicious-fixture recall threshold plus benign regression cases in CI; not a population-level precision claim |
 | **2 Syntax** | `ast.parse`, EXTRACT_SCHEMA deep-compare vs spec (zero drift) | any drift |
 | **3 Execution** | sandboxed subprocess (rlimits, empty env, network-blocked, read-only FS), 3× determinism replay | any divergence: byte-identical or dead |
 | **4 Accuracy** | full golden dataset vs compiled decision logic (mocked extractor) | anything under 100% |
@@ -249,7 +255,7 @@ from spec to receipt to AKU before adopting it.
 
 ## License
 
-MIT. The clinical example is synthetic reference data for tests — not a
+MIT OR Apache-2.0. The clinical example is synthetic reference data for tests — not a
 healthcare product; no real PHI exists in this repository.
 
 ---
@@ -312,3 +318,5 @@ first divergence, and a `wrong_output` failure class. Fixtures may declare
 Category metadata and attribution are build-time evidence only. They never
 enter generated Python, and compiling the same spec before and after attribution
 produces the same artifact SHA.
+[![CI](https://github.com/zrk222/code-factory-3-compile/actions/workflows/ci.yaml/badge.svg)](https://github.com/zrk222/code-factory-3-compile/actions/workflows/ci.yaml)
+[![PyPI](https://img.shields.io/pypi/v/code-factory-3-compile.svg)](https://pypi.org/project/code-factory-3-compile/)

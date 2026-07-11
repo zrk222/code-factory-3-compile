@@ -1,15 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-factory-3-compile"
-version = "0.4.0"
+version = "0.5.0"
 description = "HSF - Harness Software Factory: compile declarative workflow specs into deterministic, gate-validated Python artifacts with receipt-backed token metering."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 dependencies = ["pydantic>=2.5", "PyYAML>=6.0", "jinja2>=3.1"]
+
+[project.urls]
+Homepage = "https://github.com/zrk222/code-factory-3-compile"
+Documentation = "https://github.com/zrk222/code-factory-3-compile#readme"
+Issues = "https://github.com/zrk222/code-factory-3-compile/issues"
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.34"]

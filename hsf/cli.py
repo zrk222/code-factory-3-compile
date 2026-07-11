@@ -143,6 +143,20 @@ def cmd_meter(args):
     from hsf.telemetry import context_token_report
     print(json.dumps(context_token_report(max_tokens=args.max_tokens), indent=2))
 
+def cmd_challenge(args):
+    from hsf.challenge import challenge_spec
+    spec_path = _resolve_existing(args.spec, kind="spec")
+    root = spec_path.resolve().parent.parent
+    spec, _ = _load(args.spec)
+    golden_path = root / "goldens" / spec.workflow_spec / "cases.jsonl"
+    payload = challenge_spec(spec_path, golden_path)
+    out = Path(args.output) if args.output else root / ".hsf" / spec.workflow_spec / "challenge.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    print(json.dumps(payload | {"receipt_path": str(out)}, indent=2))
+    if not payload["passed"]:
+        raise SystemExit(1)
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="hsf", description="Harness Software Factory")
     sub = p.add_subparsers(required=True)
@@ -167,6 +181,7 @@ def main(argv=None):
     s = sub.add_parser("topology"); s.add_argument("manifest"); s.set_defaults(fn=cmd_topology)
     s = sub.add_parser("bench"); s.add_argument("--compile-tokens", type=int, default=34000); s.set_defaults(fn=cmd_bench)
     s = sub.add_parser("meter"); s.add_argument("--max-tokens", type=int, default=32000); s.set_defaults(fn=cmd_meter)
+    s = sub.add_parser("challenge"); s.add_argument("spec"); s.add_argument("-o", "--output", default=None); s.set_defaults(fn=cmd_challenge)
     args = p.parse_args(argv)
     try:
         args.fn(args)

@@ -22,4 +22,6 @@ jobs:
         run: |
           hsf validate specs/glp1_review.yaml
           hsf compile specs/glp1_review.yaml
+          hsf goldens "registry_store/glp1_review-*.py" glp1_review
+          hsf challenge specs/glp1_review.yaml
         shell: bash

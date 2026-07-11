@@ -6,7 +6,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -17,11 +17,22 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Build distributions
+      - name: Test and build
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build twine
+          python -m pip install -e ".[dev,serve]" build twine
+          python -m pytest -q
+          hsf challenge specs/glp1_review.yaml
           python -m build
           python -m twine check dist/*
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Clean wheel smoke
+        run: |
+          python -m venv /tmp/hsf-wheel
+          /tmp/hsf-wheel/bin/python -m pip install dist/*.whl
+          /tmp/hsf-wheel/bin/python -m hsf --help
+      - name: Attach distributions
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+      - uses: pypa/gh-action-pypi-publish@release/v1
