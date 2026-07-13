@@ -50,9 +50,7 @@ def test_serve_endpoint(tmp_path, artifact_source):
     assert r2["status"] == "DENIED"
 
 def test_demo_runs_clean(capsys, monkeypatch, tmp_path):
-    import os, shutil
-    root = Path(__file__).resolve().parents[1]
-    monkeypatch.chdir(root)
+    monkeypatch.chdir(tmp_path)
     from hsf.demo import run_demo
     run_demo()
     out = capsys.readouterr().out

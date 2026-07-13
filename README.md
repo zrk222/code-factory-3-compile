@@ -36,7 +36,8 @@ spec.yaml ─► Foundry (template | llm, 1 call) ─► 4 Gates ─► signed a
 ## 60-second wow
 
 ```bash
-pip install -e ".[dev]" && hsf demo
+pip install code-factory-3-compile==0.5.2
+hsf demo
 ```
 
 `hsf demo` compiles the reference workflow, walks all four gates, signs the

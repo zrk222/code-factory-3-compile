@@ -1,0 +1,26 @@
+workflow_spec: glp1_review
+version: 1
+metadata:
+  owner: rick@wizeme.app
+  compliance: ["HIPAA", "CMS_Decision_Timeframes"]
+inputs:
+  input_data:
+    text: string
+steps:
+  - id: extract_clinical_factors
+    type: bounded_invocation
+    schema:
+      has_t2d_diagnosis: boolean
+      current_a1c: {type: float, min: 3.0, max: 20.0}
+      bmi: {type: float, min: 10.0, max: 100.0}
+    on_out_of_bounds: human_review
+  - id: decide
+    type: branch
+    rules:
+      - if: "has_t2d_diagnosis == true"
+        then: {status: APPROVED, reason: "T2D Diagnosis"}
+      - if: "bmi >= 30.0"
+        then: {status: APPROVED, reason: "BMI Criteria"}
+      - else: {status: DENIED, reason: "Criteria Not Met"}
+outputs:
+  AuthResult: {status: "enum[APPROVED, DENIED, HUMAN_REVIEW]", reason: string}

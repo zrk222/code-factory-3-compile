@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-factory-3-compile"
-version = "0.5.1"
+version = "0.5.2"
 description = "HSF - Harness Software Factory: compile declarative workflow specs into deterministic, gate-validated Python artifacts with receipt-backed token metering."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,8 @@ hsf = [
   "context/library/templates/*.j2",
   "foundry/prompts/*.txt",
   "runtime/extractor_prompts/*.txt",
+  "demo_assets/specs/*.yaml",
+  "demo_assets/goldens/*/*.jsonl",
 ]
 
 [tool.pytest.ini_options]
