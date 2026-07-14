@@ -10,14 +10,17 @@ from . import __version__
 
 
 def _commit(root: Path) -> str | None:
-    for directory in (root, *root.parents):
-        if (directory / ".git").exists():
-            try:
-                run = subprocess.run(["git", "rev-parse", "HEAD"], cwd=directory, capture_output=True, text=True, timeout=3)
-            except OSError:
-                return None
-            return run.stdout.strip() if run.returncode == 0 else None
-    return None
+    source_root = root.parent
+    manifest = source_root / "pyproject.toml"
+    if not (source_root / ".git").exists() or not manifest.exists():
+        return None
+    if 'name = "code-factory-3-compile"' not in manifest.read_text(encoding="utf-8"):
+        return None
+    try:
+        run = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source_root, capture_output=True, text=True, timeout=3)
+    except OSError:
+        return None
+    return run.stdout.strip() if run.returncode == 0 else None
 
 
 def _hash(root: Path) -> str:
