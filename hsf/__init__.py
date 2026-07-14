@@ -4,4 +4,4 @@ Compiled AI: one model (or template) invocation per workflow type,
 zero model calls per transaction, four validation gates, LTAP receipts.
 """
 
-__version__ = "0.3.1"
+__version__ = "0.5.3"

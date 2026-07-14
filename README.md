@@ -36,7 +36,7 @@ spec.yaml ─► Foundry (template | llm, 1 call) ─► 4 Gates ─► signed a
 ## 60-second wow
 
 ```bash
-pip install code-factory-3-compile==0.5.2
+pip install code-factory-3-compile==0.5.3
 hsf demo
 ```
 

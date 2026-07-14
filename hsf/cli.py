@@ -158,8 +158,14 @@ def cmd_challenge(args):
         raise SystemExit(1)
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--version":
+        from hsf.provenance import provenance
+        payload = provenance()
+        print(json.dumps(payload, indent=2, sort_keys=True) if "--json" in argv else f"hsf {payload['version']}")
+        return
     p = argparse.ArgumentParser(prog="hsf", description="Harness Software Factory")
-    sub = p.add_subparsers(required=True)
+    sub = p.add_subparsers(required=True, dest="cmd")
     s = sub.add_parser("validate"); s.add_argument("spec"); s.set_defaults(fn=cmd_validate)
     s = sub.add_parser("compile"); s.add_argument("spec")
     s.add_argument("--engine", default="template", choices=["template", "llm"])
@@ -182,7 +188,13 @@ def main(argv=None):
     s = sub.add_parser("bench"); s.add_argument("--compile-tokens", type=int, default=34000); s.set_defaults(fn=cmd_bench)
     s = sub.add_parser("meter"); s.add_argument("--max-tokens", type=int, default=32000); s.set_defaults(fn=cmd_meter)
     s = sub.add_parser("challenge"); s.add_argument("spec"); s.add_argument("-o", "--output", default=None); s.set_defaults(fn=cmd_challenge)
+    s = sub.add_parser("version"); s.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
+    if args.cmd == "version":
+        from hsf.provenance import provenance
+        payload = provenance()
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else f"hsf {payload['version']}")
+        return
     try:
         args.fn(args)
     except CliError as exc:
