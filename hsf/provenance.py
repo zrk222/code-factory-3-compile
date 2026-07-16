@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from . import __version__
+from ._build_provenance import SOURCE_COMMIT
 
 
 def _commit(root: Path) -> str | None:
@@ -45,7 +46,7 @@ def provenance() -> dict:
             origin = "site-packages"
     except importlib.metadata.PackageNotFoundError:
         pass
-    source_commit = _commit(root)
+    source_commit = _commit(root) or SOURCE_COMMIT
     build_hash = _hash(root)
     return {"schema": "factory.provenance.v1", "package": "code-factory-3-compile", "version": __version__,
             "source_commit": source_commit, "build_hash": build_hash, "install_origin": origin,
