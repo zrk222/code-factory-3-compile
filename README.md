@@ -10,6 +10,25 @@ artifact, pushes that artifact through a four-gate validation pipeline
 > One model call per workflow **type**. Zero model calls per transaction.
 > Given identical input: byte-identical output (**H = 0**).
 
+## Code Factory target handoff
+
+Code Factory's target compiler emits four blocked starter shapes: `worker`,
+`web`, `mobile`, and `agent-ui`. HSF applies only to decision-shaped logic
+inside those targets: explicit fields, ordered rules, goldens, and deterministic
+outputs. It does not compile open-ended research, writing, conversation, or an
+entire web or mobile product.
+
+```mermaid
+flowchart LR
+    A["Intent"] --> B["Build and gate"]
+    B --> C["Compile and verify"]
+    C --> D["Signed receipts and human-owned ship"]
+```
+
+The target compiler itself makes no model calls. A generated app may add a
+model later through product-specific implementation and capability review.
+HSF's zero-runtime-model claim remains limited to the compiled decision path.
+
 ## Workflow at a glance
 
 ```mermaid
