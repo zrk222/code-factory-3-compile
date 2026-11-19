@@ -8,7 +8,7 @@ one permitted probabilistic step.
 (e) on_out_of_bounds policy execution (by the artifact's compiled guards)
 """
 from __future__ import annotations
-import re
+import re, math
 from .injection import scan_codes as _scan_injection
 
 MAX_INPUT_CHARS = 50_000
@@ -29,7 +29,7 @@ def validate_input(text: str) -> list[str]:
 _PY = {"boolean": bool, "float": (int, float), "int": int, "string": str}
 
 def strict_parse(schema: dict, payload: dict | None) -> dict | None:
-    if payload is None:
+    if not isinstance(payload, dict):
         return None
     if set(payload) != set(schema):
         return None  # extra="forbid" + missing-field rejection
@@ -39,8 +39,18 @@ def strict_parse(schema: dict, payload: dict | None) -> dict | None:
         v = payload[k]
         if v is None or not isinstance(v, _PY[t]) or (t != "boolean" and isinstance(v, bool)):
             return None
-        out[k] = float(v) if t == "float" else v
+        try:
+            out[k] = _finite_float(v) if t == "float" else v
+        except (ValueError, OverflowError):
+            return None
     return out
+
+def _finite_float(value):
+    converted = float(value)
+    if not math.isfinite(converted):
+        raise ValueError("nonfinite float")
+    return converted
+
 
 class SafetySandwich:
     def __init__(self, extractor):

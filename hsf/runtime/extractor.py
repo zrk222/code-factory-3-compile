@@ -5,7 +5,8 @@ FixtureExtractor serves tests/goldens and offline use. AnthropicExtractor
 is the optional real one, holding ONLY HSF_EXTRACTOR_KEY (never the
 generation-plane credential)."""
 from __future__ import annotations
-import json, os
+import json, os, math
+from copy import deepcopy
 
 EXTRACTOR_PROMPT_VERSION = "clinical_v1"
 
@@ -40,3 +41,17 @@ class AnthropicExtractor:
             except json.JSONDecodeError:
                 continue
         return None  # -> HUMAN_REVIEW via sandwich
+
+
+class StructuredExtractor:
+    """Per-transaction deterministic input; no provider or environment access."""
+    def __init__(self, fields):
+        self.fields = deepcopy(fields)
+
+    async def extract(self, schema: dict, text: str) -> dict | None:
+        if not isinstance(self.fields, dict):
+            return None
+        for value in self.fields.values():
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+        return self.fields
