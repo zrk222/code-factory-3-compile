@@ -165,7 +165,7 @@ _LIVE = adapter.AVAILABLE and os.environ.get("HSF_TEMPORAL_TEST_SERVER") == "1"
 
 @pytest.mark.skipif(not _LIVE, reason="set HSF_TEMPORAL_TEST_SERVER=1 for actual controlled server")
 def test_temporal_server_execution_replay_retry_cancel_restart(tmp_path, artifact_source):
-    asyncio.run(_server_controls(tmp_path, artifact_source))
+    asyncio.run(asyncio.wait_for(_server_controls(tmp_path, artifact_source), timeout=120))
 
 
 async def _server_controls(tmp_path, artifact_source):
@@ -179,8 +179,11 @@ async def _server_controls(tmp_path, artifact_source):
     if cache:
         # The SDK writes its executable here but does not create parent folders.
         Path(cache).mkdir(parents=True, exist_ok=True)
-    start_server = WorkflowEnvironment.start_local if os.name == "nt" else WorkflowEnvironment.start_time_skipping
-    async with await start_server(download_dest_dir=cache) as env:
+    # Use the same real development server on every OS; virtual time can hide
+    # scheduling differences in process cancellation and worker restart controls.
+    print("Temporal: starting development server", flush=True)
+    async with await WorkflowEnvironment.start_local(download_dest_dir=cache) as env:
+        print("Temporal: signed execution and replay", flush=True)
         async with adapter.create_worker(env.client, "execution", activities):
             result = await adapter.execute_transaction(env.client, "execution", request)
             assert result["status"] == "APPROVED"
@@ -188,9 +191,13 @@ async def _server_controls(tmp_path, artifact_source):
             history = await handle.fetch_history()
             await Replayer(workflows=[adapter.TemporalArtifactWorkflow],
                            workflow_runner=adapter.workflow_runner()).replay_workflow(history)
+        print("Temporal: retry", flush=True)
         await _retry_control(env, Worker, activity, ApplicationError)
+        print("Temporal: permanent rejection", flush=True)
         await _permanent_control(env, activities, path, request)
+        print("Temporal: child cancellation", flush=True)
         await _real_child_cancel_control(env, activities, request)
+        print("Temporal: worker recovery", flush=True)
         await _cancel_restart_control(env, Worker, activity, activities, request)
 
 
