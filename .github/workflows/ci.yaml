@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,signing]"
       - run: python -m pytest -q
       - name: end-to-end compile + goldens (template engine, no secrets)
         run: |
@@ -25,3 +25,23 @@ jobs:
           hsf goldens "registry_store/glp1_review-*.py" glp1_review
           hsf challenge specs/glp1_review.yaml
         shell: bash
+  temporal-controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,signing,temporal]" "temporalio==1.36.1"
+      - name: Verify actual SDK execution, replay, retry, cancellation and recovery
+        env:
+          HSF_TEMPORAL_TEST_SERVER: "1"
+          HSF_TEMPORAL_TEST_CACHE: ${{ runner.temp }}/hsf-temporal
+        run: python -m pytest tests/test_temporal_adapter.py -q --junitxml=temporal-controls.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: temporal-controls
+          path: temporal-controls.xml
+          if-no-files-found: error
