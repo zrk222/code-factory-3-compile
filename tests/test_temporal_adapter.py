@@ -176,6 +176,9 @@ async def _server_controls(tmp_path, artifact_source):
     path, public, request = _signed(tmp_path, artifact_source)
     activities = adapter.ArtifactActivities(tmp_path, public)
     cache = os.environ.get("HSF_TEMPORAL_TEST_CACHE")
+    if cache:
+        # The SDK writes its executable here but does not create parent folders.
+        Path(cache).mkdir(parents=True, exist_ok=True)
     start_server = WorkflowEnvironment.start_local if os.name == "nt" else WorkflowEnvironment.start_time_skipping
     async with await start_server(download_dest_dir=cache) as env:
         async with adapter.create_worker(env.client, "execution", activities):
