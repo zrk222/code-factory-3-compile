@@ -190,8 +190,9 @@ Receipts also include a `token_meter` section:
   records the real value: zero model calls and zero compile tokens. LLM compile
   mode records provider-reported `input_tokens` and `output_tokens` when the
   provider returns usage.
-- `runtime`: per-transaction model calls and tokens. Compiled artifacts record
-  the real runtime value: zero model calls and zero runtime tokens.
+- `runtime`: compiled decision logic uses zero model calls and tokens. Optional
+  text extraction can call a provider; its usage is separate. Use the pinned
+  `--structured-only` profile to prohibit provider extraction during execution.
 - `context_modules`: per-module context token density for concepts, contracts,
   and templates. With `pip install .[tokens]`, counts use `tiktoken` and are
   marked exact. Without it, counts are marked `chars_per_token_estimate`.
@@ -199,8 +200,8 @@ Receipts also include a `token_meter` section:
   plus an explicit interpretive baseline assumption.
 
 That distinction matters. The receipt can measure what this run actually did:
-provider-reported compile tokens when an LLM is used, true zero-token runtime
-for compiled artifacts, and exact-or-estimated context density with provenance.
+provider-reported compile tokens when an LLM is used, zero-token compiled
+decisions, and exact-or-estimated context density with provenance.
 But "how much did I save?" depends on what you compare against. Unless you also
 instrument the competing interpretive workflow, the baseline is an assumption.
 HSF states that baseline out loud instead of hiding it inside a big savings
@@ -214,11 +215,38 @@ number.
   **no LLM credentials**; the quarantined extractor holds its own restricted
   key (Dual-LLM pattern), returns schema-locked JSON, retries once, then
   routes to HUMAN_REVIEW.
-- Artifacts are content-addressed and signature-verified before load
-  (`E_UNSIGNED_ARTIFACT` otherwise). v1 signs with local HMAC-SHA256;
-  ed25519 via `cryptography` is the drop-in upgrade.
+- Artifacts are signature-verified before load, and only the verified byte
+  buffer is compiled. Ed25519 uses an operator-pinned public key; pinning a key
+  rejects HMAC downgrade. Legacy local HMAC remains available for compatibility.
 - Prompt injection embedded in input text is flagged in the audit log and
   cannot alter the compiled decision (tested with adversarial goldens).
+
+### Signed, model-free decisions
+
+Install `code-factory-3-compile[signing]`. Supply raw 32-byte Ed25519 private/public
+key files from your key-management process; keep the private key outside the registry.
+
+```sh
+hsf compile specs/refund_review.yaml --signing-key /secure/private.raw
+hsf run "registry_store/refund_review-*.py" --trusted-public-key /secure/public.raw --structured-only --extracted '{"within_return_window":true,"amount":25,"item_damaged":false}'
+```
+
+This profile rejects custom extractors, provider imports, reflective code, invalid
+field types and unapproved generated-code shapes. Bounds and policy decisions still
+come from the compiled spec. The GLP-1 demo remains synthetic; refund/software-policy
+controls demonstrate deterministic logic, not clinical or production validation.
+
+### Optional durable execution
+
+Install `code-factory-3-compile[temporal]`. The existing Temporal adapter now exposes
+`ArtifactActivities`, `create_worker` and `execute_transaction` for a connected SDK
+client. The operator configures the registry, trusted public key and task queue.
+Requests pin the full artifact digest, structured fields and transaction identity.
+One activity executes one verified transaction in a bounded child process; history
+supports replay and worker resumption. Validation failures do not retry, transient
+failures get at most three attempts, and cancellation kills and reaps the child.
+Duplicate transaction IDs are rejected. External effects still need idempotency;
+this adapter does not claim exactly-once effects or phase-level recovery.
 
 ## Generality
 

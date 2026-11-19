@@ -59,7 +59,7 @@ def cmd_validate(args):
 def cmd_compile(args):
     from hsf.foundry.regeneration import compile_with_regeneration
     from hsf.gates.pipeline import run_pipeline, write_receipt
-    from hsf.registry import store_artifact
+    from hsf.registry import store_artifact, RegistryError
     spec, sha = _load(args.spec)
     spec_path = _resolve_existing(args.spec, kind="spec")
     root = spec_path.resolve().parent.parent
@@ -71,20 +71,32 @@ def cmd_compile(args):
                             golden_cases=goldens,
                             input_texts=[c["input_text"] for c in goldens[:10]])
     src, meta, chain = compile_with_regeneration(spec, sha, gate_runner, engine=args.engine)
-    path, art_sha = store_artifact(src, Path(args.registry), spec.workflow_spec)
+    signing = {"signing_key": Path(args.signing_key)} if args.signing_key else {}
+    try:
+        path, art_sha = store_artifact(src, Path(args.registry), spec.workflow_spec, **signing)
+    except RegistryError as exc:
+        raise CliError(str(exc)) from exc
     passed, results = gate_runner(src)
     receipt = write_receipt(Path("receipts"), spec_id=spec.workflow_spec, spec_sha=sha,
                             artifact_sha=art_sha, compile_meta=meta, results=results, shipped=passed)
     print(f"COMPILED {path}\nRECEIPT  {receipt}\nshipped={passed} attempts={meta.get('attempts',1)}")
 
 def cmd_run(args):
-    from hsf.registry import verify_artifact
+    from hsf.registry import verify_artifact, RegistryError
     from hsf.runtime import Orchestrator
     from hsf.runtime.extractor import FixtureExtractor
     fields = _json_arg(args.extracted, name="--extracted")
     artifact = _resolve_existing(args.artifact, kind="artifact")
-    orch = Orchestrator(artifact, FixtureExtractor(fields), verify=verify_artifact)
-    result = orch.run({"text": args.text})
+    try:
+        orch = Orchestrator(
+            artifact, None if args.structured_only else FixtureExtractor(fields),
+            verify=verify_artifact,
+            trusted_public_key=Path(args.trusted_public_key) if args.trusted_public_key else None,
+            expected_sha=args.expected_sha, structured_only=args.structured_only,
+        )
+        result = orch.run_structured(fields) if args.structured_only else orch.run({"text": args.text})
+    except (RegistryError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
     print(json.dumps({"status": result.status, "reason": result.reason}))
 
 def cmd_goldens(args):
@@ -170,8 +182,12 @@ def main(argv=None):
     s = sub.add_parser("compile"); s.add_argument("spec")
     s.add_argument("--engine", default="template", choices=["template", "llm"])
     s.add_argument("--registry", default="registry_store"); s.set_defaults(fn=cmd_compile)
+    s.add_argument("--signing-key", help="Ed25519 private-key file; omitted uses legacy local HMAC")
     s = sub.add_parser("run"); s.add_argument("artifact"); s.add_argument("--text", default="")
     s.add_argument("--extracted", default=""); s.set_defaults(fn=cmd_run)
+    s.add_argument("--trusted-public-key", help="operator-pinned Ed25519 public-key file")
+    s.add_argument("--expected-sha", help="expected full artifact SHA-256")
+    s.add_argument("--structured-only", action="store_true", help="validate structured fields without a model provider; requires pinned public key")
     s = sub.add_parser("goldens"); s.add_argument("artifact"); s.add_argument("spec_id"); s.set_defaults(fn=cmd_goldens)
     s = sub.add_parser("init"); s.add_argument("name"); s.set_defaults(fn=cmd_init)
     s = sub.add_parser("demo"); s.set_defaults(fn=cmd_demo)

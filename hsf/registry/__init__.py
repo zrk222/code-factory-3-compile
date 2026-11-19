@@ -1,2 +1,2 @@
-from .artifacts import store_artifact, verify_artifact, RegistryError
-__all__ = ["store_artifact", "verify_artifact", "RegistryError"]
+from .artifacts import store_artifact, verify_artifact, verified_artifact_bytes, RegistryError
+__all__ = ["store_artifact", "verify_artifact", "verified_artifact_bytes", "RegistryError"]
