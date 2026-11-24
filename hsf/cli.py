@@ -11,12 +11,12 @@ def _die(message: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 def _resolve_existing(path_or_glob: str, *, kind: str = "file") -> Path:
-    matches = sorted(Path(p) for p in glob.glob(path_or_glob))
-    if matches:
-        return matches[-1]
     path = Path(path_or_glob)
     if path.exists():
         return path
+    matches = sorted(Path(p) for p in glob.glob(path_or_glob))
+    if matches:
+        return matches[-1]
     hint = " Use Get-ChildItem/ls to inspect generated files, or run `hsf compile <spec>` first."
     raise CliError(f"{kind} not found: {path_or_glob}.{hint}")
 
@@ -60,26 +60,46 @@ def cmd_compile(args):
     from hsf.foundry.regeneration import compile_with_regeneration
     from hsf.gates.pipeline import run_pipeline, write_receipt
     from hsf.registry import store_artifact, RegistryError
-    spec, sha = _load(args.spec)
-    spec_path = _resolve_existing(args.spec, kind="spec")
-    root = spec_path.resolve().parent.parent
+    from hsf.spec import load_spec
+    spec_path = _resolve_existing(args.spec, kind="spec").resolve()
+    spec, sha = load_spec(spec_path, expected_file_sha256=args.expected_spec_file_sha256)
+    root = spec_path.parent.parent
     goldens = _goldens_for(spec.workflow_spec, root)
+    if not goldens:
+        raise CliError("compile requires reviewed golden cases")
     schema = _schema_of(spec)
     smoke = goldens[:5]
-    def gate_runner(src):
-        return run_pipeline(src, spec_schema=schema, smoke_cases=smoke,
-                            golden_cases=goldens,
-                            input_texts=[c["input_text"] for c in goldens[:10]])
-    src, meta, chain = compile_with_regeneration(spec, sha, gate_runner, engine=args.engine)
+    input_texts = [case["input_text"] for case in goldens[:10]]
+    observation = None
+
+    def gate_runner(source):
+        nonlocal observation
+        observation = run_pipeline(source, spec_schema=schema, smoke_cases=smoke,
+                                   golden_cases=goldens, input_texts=input_texts,
+                                   spec_identity=(spec.workflow_spec, sha))
+        return observation
+
+    src, meta, _ = compile_with_regeneration(
+        spec, sha, gate_runner, engine=args.engine, policy=args.remediation
+    )
+    passed, results = observation
+    if not passed or [result.gate for result in results] != ["security", "syntax", "execution", "accuracy"]:
+        raise CliError("the candidate lacks a complete passing gate sequence")
     signing = {"signing_key": Path(args.signing_key)} if args.signing_key else {}
     try:
         path, art_sha = store_artifact(src, Path(args.registry), spec.workflow_spec, **signing)
     except RegistryError as exc:
         raise CliError(str(exc)) from exc
-    passed, results = gate_runner(src)
+    if args.expected_spec_file_sha256 is not None:
+        meta["spec_file_sha256"] = args.expected_spec_file_sha256
     receipt = write_receipt(Path("receipts"), spec_id=spec.workflow_spec, spec_sha=sha,
                             artifact_sha=art_sha, compile_meta=meta, results=results, shipped=passed)
-    print(f"COMPILED {path}\nRECEIPT  {receipt}\nshipped={passed} attempts={meta.get('attempts',1)}")
+    if args.json:
+        print(json.dumps({"shipped": passed, "artifact": str(path), "artifact_sha256": art_sha,
+                          "receipt": str(receipt), "attempts": meta["attempts"], "engine": meta["engine"]}))
+    else:
+        print(f"COMPILED {path}\nRECEIPT  {receipt}\nshipped={passed} attempts={meta['attempts']}")
+
 
 def cmd_run(args):
     from hsf.registry import verify_artifact, RegistryError
@@ -181,6 +201,9 @@ def main(argv=None):
     s = sub.add_parser("validate"); s.add_argument("spec"); s.set_defaults(fn=cmd_validate)
     s = sub.add_parser("compile"); s.add_argument("spec")
     s.add_argument("--engine", default="template", choices=["template", "llm"])
+    s.add_argument("--expected-spec-file-sha256", help="pin the exact handoff YAML bytes")
+    s.add_argument("--remediation", choices=["template-fallback", "off"], default="template-fallback")
+    s.add_argument("--json", action="store_true", help="emit the artifact and gate receipt as JSON")
     s.add_argument("--registry", default="registry_store"); s.set_defaults(fn=cmd_compile)
     s.add_argument("--signing-key", help="Ed25519 private-key file; omitted uses legacy local HMAC")
     s = sub.add_parser("run"); s.add_argument("artifact"); s.add_argument("--text", default="")
@@ -213,7 +236,16 @@ def main(argv=None):
         return
     try:
         args.fn(args)
-    except CliError as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
+        if args.cmd != "compile" and not isinstance(exc, CliError):
+            raise
+        if args.cmd == "compile" and args.json:
+            result = {"shipped": False, "error": {"code": getattr(exc, "code", "E_COMPILE"),
+                                                  "message": str(exc)}}
+            if hasattr(exc, "evidence"):
+                result["remediation_attempts"] = exc.evidence
+            print(json.dumps(result))
+            raise SystemExit(2) from None
         _die(str(exc))
 
 if __name__ == "__main__":
