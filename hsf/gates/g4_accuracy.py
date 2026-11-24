@@ -1,14 +1,12 @@
 """Gate 4 — Accuracy: full golden dataset vs compiled decision logic (mocked extractor)."""
 from __future__ import annotations
-import json
 from collections import defaultdict
 from .base import GateResult, Finding
 from hsf.attribution import Attribution, FailureClass, UnitResult
-from .sandbox_env import minimal_env
 from .g3_execution import run as _exec_run
 
 def run(source: str, golden_cases: list[dict]) -> GateResult:
-    res = _exec_run(source, golden_cases, repeats=1)
+    res = _exec_run(source, golden_cases, repeats=1, capture_outputs=True)
     if not res.passed:
         evidence = dict(res.evidence)
         attr = Attribution("accuracy", 1, 0, [
@@ -25,20 +23,10 @@ def run(source: str, golden_cases: list[dict]) -> GateResult:
         evidence["by_category"] = {}
         evidence["first_divergence"] = None
         return GateResult("accuracy", False, res.findings, evidence)
-    # re-run to capture outputs for comparison
-    import subprocess, sys, tempfile
-    from pathlib import Path
-    from .g3_execution import RUNNER
-    with tempfile.TemporaryDirectory() as td:
-        art = Path(td) / "a.py"; art.write_text(source)
-        fx = Path(td) / "f.json"; fx.write_text(json.dumps(golden_cases))
-        rn = Path(td) / "r.py"; rn.write_text(RUNNER, encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(rn), str(art), str(fx)],
-                              capture_output=True, text=True, env=minimal_env(), cwd=td, timeout=60)
-    outs = json.loads(proc.stdout)
+    outs = res.evidence["outputs"]
     findings, correct = [], 0
     units = []
-    categories = defaultdict(lambda: {"n": 0, "correct": 0})
+    categories: dict[str, dict[str, int]] = defaultdict(lambda: {"n": 0, "correct": 0})
     divergences = []
     for case, out in zip(golden_cases, outs):
         exp = case["expected"]
@@ -49,9 +37,9 @@ def run(source: str, golden_cases: list[dict]) -> GateResult:
         if passed:
             correct += 1
             categories[category]["correct"] += 1
-            evidence = "output matched expected status and reason"
+            case_evidence = "output matched expected status and reason"
         else:
-            evidence = f"expected={exp!r}, got={out!r}"
+            case_evidence = f"expected={exp!r}, got={out!r}"
             findings.append(Finding("HSF-ACC-001", "high",
                 f"case {case_id}: got {out}, expected {exp}"))
             divergences.append({"case_id": case_id, "expected": exp, "got": out})
@@ -59,7 +47,7 @@ def run(source: str, golden_cases: list[dict]) -> GateResult:
             unit=f"golden:{case_id}",
             stage="accuracy",
             passed=passed,
-            evidence=evidence,
+            evidence=case_evidence,
             failure_class=None if passed else FailureClass.WRONG_OUTPUT,
         ))
     acc = correct / max(len(golden_cases), 1)

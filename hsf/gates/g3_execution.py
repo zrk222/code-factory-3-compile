@@ -37,10 +37,12 @@ RUNNER = textwrap.dedent("""
     builtins.open = _ro_open
 
     artifact_path, fixtures_json = sys.argv[1], sys.argv[2]
-    src = _open(artifact_path).read()
+    src = _open(artifact_path, encoding="utf-8").read()
     ns = {}
     exec(compile(src, artifact_path, "exec"), ns)
     cls = next(v for k, v in ns.items() if k.endswith("Workflow") and isinstance(v, type))
+    if len(sys.argv) > 3 and [getattr(cls, "SPEC_ID", None), getattr(cls, "SPEC_SHA", None)] != sys.argv[3:]:
+        raise ValueError("runtime workflow identity differs from the loaded spec")
 
     class Ctx:
         def __init__(self, fields): self.fields = fields
@@ -51,30 +53,47 @@ RUNNER = textwrap.dedent("""
 
     async def main():
         outs = []
-        for case in json.loads(_open(fixtures_json).read()):
+        for case in json.loads(_open(fixtures_json, encoding="utf-8").read()):
             r = await cls().run(Ctx(case["extracted"]), {"text": case["input_text"]})
             outs.append({"status": r.status, "reason": r.reason})
         print(json.dumps(outs, sort_keys=True))
     loop.run_until_complete(main())
 """)
 
-def run(source: str, smoke_cases: list[dict], repeats: int = 3) -> GateResult:
+def run(source: str, smoke_cases: list[dict], repeats: int = 3, *,
+        capture_outputs=False, spec_identity: tuple[str, str] | None = None) -> GateResult:
     findings, outputs = [], []
     with tempfile.TemporaryDirectory() as td:
         art = Path(td) / "artifact.py"
-        art.write_text(source)
+        art.write_text(source, encoding="utf-8")
         fx = Path(td) / "fixtures.json"
-        fx.write_text(json.dumps(smoke_cases))
+        fx.write_text(json.dumps(smoke_cases), encoding="utf-8")
         runner = Path(td) / "runner.py"
         runner.write_text(RUNNER, encoding="utf-8")
+        argv = [sys.executable, str(runner), str(art), str(fx), *(spec_identity or ())]
         for i in range(repeats):
-            proc = subprocess.run([sys.executable, str(runner), str(art), str(fx)],
-                                  capture_output=True, text=True, env=minimal_env(), cwd=td, timeout=30)
+            try:
+                proc = subprocess.run(argv,
+                                      capture_output=True, encoding="utf-8", env=minimal_env(), cwd=td, timeout=30)
+            except subprocess.TimeoutExpired:
+                findings.append(Finding("HSF-EXE-002", "critical", f"run {i+1} exceeded 30 seconds"))
+                break
             if proc.returncode != 0:
                 findings.append(Finding("HSF-EXE-001", "critical", f"run {i+1} failed: {proc.stderr[-400:]}"))
                 break
             outputs.append(proc.stdout.strip())
     if not findings and len(set(outputs)) > 1:
         findings.append(Finding("HSF-DET-001", "critical", "nondeterministic output across identical runs"))
-    return GateResult("execution", not findings, findings,
-                      {"repeats": repeats, "byte_identical": len(set(outputs)) == 1 if outputs else False})
+    evidence: dict[str, object] = {"repeats": repeats, "byte_identical": bool(outputs) and len(set(outputs)) == 1}
+    if capture_outputs and not findings:
+        try:
+            decoded = json.loads(outputs[0])
+            if not isinstance(decoded, list) or len(decoded) != len(smoke_cases) or any(
+                not isinstance(row, dict) or set(row) != {"status", "reason"}
+                or any(not isinstance(value, str) for value in row.values()) for row in decoded
+            ):
+                raise ValueError("unexpected decision output shape or count")
+            evidence["outputs"] = decoded
+        except (IndexError, ValueError) as error:
+            findings.append(Finding("HSF-EXE-003", "critical", f"invalid sandbox output: {error}"))
+    return GateResult("execution", not findings, findings, evidence)

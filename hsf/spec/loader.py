@@ -36,17 +36,29 @@ def validate_expression(expr: str, known_fields: set[str]) -> None:
         if isinstance(node, ast.Name) and node.id not in known_fields | {"true", "false", "True", "False"}:
             raise SpecError("E_UNRESOLVED_REF", f"condition references unknown field {node.id!r}")
 
-def spec_sha256(raw_yaml: str) -> str:
-    data = yaml.safe_load(raw_yaml)
+def _spec_digest(data) -> str:
     canon = json.dumps(data, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canon.encode()).hexdigest()
 
-def load_spec(path: str | Path) -> tuple[SpecModel, str]:
-    path = Path(path)
-    raw = path.read_text()
-    data = yaml.safe_load(raw)
+
+def spec_sha256(raw_yaml: str) -> str:
+    return _spec_digest(yaml.safe_load(raw_yaml))
+
+
+def load_spec(
+    path: str | Path, *, expected_file_sha256: str | None = None
+) -> tuple[SpecModel, str]:
+    raw = Path(path).read_bytes()
+    if expected_file_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_file_sha256:
+        raise SpecError("E_SPEC_DRIFT", "workflow spec bytes differ from the handoff")
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as error:
+        raise SpecError("E_SPEC_FORMAT", str(error)) from error
+    if not isinstance(data, dict):
+        raise SpecError("E_SPEC_FORMAT", "workflow spec must be a YAML mapping")
     spec = SpecModel(**data)
-    sha = spec_sha256(raw)
+    sha = _spec_digest(data)
 
     produced: set[str] = set(spec.inputs.keys())
     step_ids: set[str] = set()

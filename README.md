@@ -231,6 +231,17 @@ hsf compile specs/refund_review.yaml --signing-key /secure/private.raw
 hsf run "registry_store/refund_review-*.py" --trusted-public-key /secure/public.raw --structured-only --extracted '{"within_return_window":true,"amount":25,"item_damaged":false}'
 ```
 
+For a ForgeLine handoff, use the emitted command with
+`--expected-spec-file-sha256` and `--json`. HSF verifies the exact YAML bytes
+and the compiled workflow identity before registering an artifact. Successful
+output includes the artifact path and the gate receipt.
+
+The default `template-fallback` remediation policy can rebuild an LLM candidate
+once from the same validated spec after a syntax, execution, or accuracy
+failure. The replacement must pass all four gates. Security failures stop
+the build. Use `--remediation off` to report the first failure. The compile
+receipt records attempts and the selected policy.
+
 This profile rejects custom extractors, provider imports, reflective code, invalid
 field types and unapproved generated-code shapes. Bounds and policy decisions still
 come from the compiled spec. The GLP-1 demo remains synthetic; refund/software-policy

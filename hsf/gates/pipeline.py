@@ -16,12 +16,13 @@ from hsf.telemetry import context_token_report, token_savings
 
 def run_pipeline(source: str, *, spec_schema: dict, smoke_cases: list[dict],
                  golden_cases: list[dict], canary: str | None = None,
-                 input_texts: list[str] | None = None) -> tuple[bool, list[GateResult]]:
+                 input_texts: list[str] | None = None,
+                 spec_identity: tuple[str, str] | None = None) -> tuple[bool, list[GateResult]]:
     results: list[GateResult] = []
     for gate_fn, kwargs in (
         (g1_security.run, {"canary": canary, "input_texts": input_texts}),
-        (g2_syntax.run, {"spec_schema": spec_schema}),
-        (g3_execution.run, {"smoke_cases": smoke_cases}),
+        (g2_syntax.run, {"spec_schema": spec_schema, "spec_identity": spec_identity}),
+        (g3_execution.run, {"smoke_cases": smoke_cases, "spec_identity": spec_identity}),
         (g4_accuracy.run, {"golden_cases": golden_cases}),
     ):
         r = gate_fn(source, **kwargs)
@@ -56,9 +57,11 @@ def write_receipt(out_dir: Path, *, spec_id: str, spec_sha: str, artifact_sha: s
     receipt = {
         "ltap": ["ingest", "decide", "act", "update", "audit"],
         "spec_id": spec_id, "spec_sha": spec_sha, "artifact_sha": artifact_sha,
+        **({"spec_file_sha256": compile_meta["spec_file_sha256"]} if "spec_file_sha256" in compile_meta else {}),
         "doctrine_hash": doctrine_hash(),
         "engine": compile_meta.get("engine"),
         "attempts": compile_meta.get("attempts", 1),
+        **({"remediation": compile_meta["remediation"]} if "remediation" in compile_meta else {}),
         "compiled_at": compile_meta.get("compiled_at"),
         "gates": [r.summary() | {"evidence": r.evidence} for r in results],
         "attribution": next(
