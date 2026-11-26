@@ -49,11 +49,28 @@ def _load(spec_path):
     from hsf.spec import load_spec
     return load_spec(_resolve_existing(spec_path, kind="spec"))
 
+_GOLDEN_KEYS = ("input_text", "extracted", "expected")
+
+
 def _goldens_for(spec_id: str, root: Path | None = None) -> list[dict]:
     p = (root or Path(".")) / "goldens" / spec_id / "cases.jsonl"
     if not p.exists():
         raise CliError(f"goldens not found for spec_id={spec_id!r}: {p}")
-    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = []
+    for number, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise CliError(f"E_GOLDEN_SHAPE: {p}:{number}: not JSON ({exc.msg})") from exc
+        missing = [key for key in _GOLDEN_KEYS if not isinstance(row, dict) or key not in row]
+        expected = row.get("expected") if isinstance(row, dict) else None
+        if missing or not isinstance(expected, dict) or not {"status", "reason"} <= set(expected):
+            raise CliError(f"E_GOLDEN_SHAPE: {p}:{number}: each row needs input_text, extracted and "
+                           f"expected{{status, reason}} (missing: {', '.join(missing) or 'expected.status/reason'})")
+        rows.append(row)
+    return rows
 
 def _rooted(path: str, root: str | None) -> Path:
     """Resolve a relative output path against --root (H-CON-1); without --root keep today's cwd behaviour."""

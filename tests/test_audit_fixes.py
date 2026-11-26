@@ -143,3 +143,22 @@ def test_dev_extra_installs_what_the_suite_imports():
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     dev = re.search(r'^dev = \[(.*)\]$', pyproject, re.M).group(1)
     assert "cryptography" in dev and "pytest" in dev
+
+
+def test_malformed_golden_rows_get_a_shape_error_not_a_traceback(tmp_path):
+    import json
+
+    import pytest
+
+    from hsf.cli import CliError, _goldens_for
+
+    path = tmp_path / "goldens" / "w" / "cases.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"input": {"a": 1}, "expected": {"status": "APPROVED", "reason": "x"}}) + "\n",
+                    encoding="utf-8")
+    with pytest.raises(CliError, match="E_GOLDEN_SHAPE: .*:1: .*missing: input_text, extracted"):
+        _goldens_for("w", tmp_path)
+    path.write_text('{"input_text": "t", "extracted": {}, "expected": {"status": "APPROVED", "reason": "x"}}\nnot json\n',
+                    encoding="utf-8")
+    with pytest.raises(CliError, match=r"E_GOLDEN_SHAPE: .*:2: not JSON"):
+        _goldens_for("w", tmp_path)
