@@ -228,6 +228,8 @@ def main(argv=None):
     s = sub.add_parser("meter"); s.add_argument("--max-tokens", type=int, default=32000); s.set_defaults(fn=cmd_meter)
     s = sub.add_parser("challenge"); s.add_argument("spec"); s.add_argument("-o", "--output", default=None); s.set_defaults(fn=cmd_challenge)
     s = sub.add_parser("version"); s.add_argument("--json", action="store_true")
+    from hsf.harness.cli import register as _register_harness
+    _register_harness(sub)
     args = p.parse_args(argv)
     if args.cmd == "version":
         from hsf.provenance import provenance
@@ -235,8 +237,14 @@ def main(argv=None):
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else f"hsf {payload['version']}")
         return
     try:
-        args.fn(args)
-    except (ValueError, OSError, RuntimeError) as exc:
+        rc = args.fn(args)
+        if args.cmd == "harness" and rc:
+            raise SystemExit(rc)
+    except (ValueError, OSError, RuntimeError, KeyError) as exc:
+        if args.cmd == "harness":
+            _die(str(exc))
+        if isinstance(exc, KeyError):
+            raise
         if args.cmd != "compile" and not isinstance(exc, CliError):
             raise
         if args.cmd == "compile" and args.json:

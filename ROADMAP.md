@@ -20,6 +20,12 @@
 - `hsf init` scaffold, `hsf demo`, `hsf serve` (FastAPI), `hsf badge`
 - Spec gallery: 5 domains, zero-code-change generality test
 
+## v0.6 (this change)
+
+- `hsf harness`: self-healing app harness scaffolding (init, status, check, heal, pass, add-feature):
+  sealed feature ledger, protected-file digest lock, parallel and input-cached gates, flake detection,
+  failure classification, and a guarded, receipted, bounded repair loop with exact rollback.
+
 ## v0.4 (help wanted)
 
 - [ ] `hsf draft "<policy in English>"` - LLM drafts the spec YAML, which then
