@@ -37,10 +37,14 @@ def append_progress(root: Path, spec: HarnessSpec, event: str, **fields) -> None
 
 
 def run_init(root: Path, spec: HarnessSpec) -> list[dict]:
-    results = []
+    results: list[dict[str, Any]] = []
     for command in spec.init:
-        done = subprocess.run(command, shell=True, cwd=root, capture_output=True, text=True, errors="replace",
-                              timeout=spec.repair.timeout_s)
+        try:
+            done = subprocess.run(command, shell=True, cwd=root, capture_output=True, text=True, errors="replace",
+                                  timeout=spec.repair.timeout_s, env=gate_env())
+        except subprocess.TimeoutExpired:
+            results.append({"command": command, "exit_code": None, "output_tail": "init command timed out"})
+            break
         results.append({"command": command, "exit_code": done.returncode,
                         "output_tail": (done.stdout + done.stderr)[-2000:]})
         if done.returncode != 0:
@@ -82,8 +86,12 @@ def _signatures(failures) -> frozenset[str]:
     return frozenset(run.signature for run in failures)
 
 
-def _verify(root: Path, spec: HarnessSpec):
-    runs = run_gates(spec.gates, root, parallel=spec.parallel_gates)
+def _digests(root: Path, spec: HarnessSpec) -> dict[str, str]:
+    return guard.tree_digests(root, spec.protected)
+
+
+def _verify(root: Path, spec: HarnessSpec, *, use_cache: bool = True):
+    runs = run_gates(spec.gates, root, parallel=spec.parallel_gates, use_cache=use_cache)
     return runs, failing(runs, spec.gates)
 
 
@@ -99,41 +107,50 @@ def _heal_environment(root: Path, spec: HarnessSpec, failures, rounds: list) -> 
     return runs, failures
 
 
+def _rollback(row: dict[str, Any], snapshot: guard.Snapshot, root: Path, spec: HarnessSpec, action: str) -> None:
+    row["rolled_back"] = snapshot.restore(_digests(root, spec))
+    if snapshot.incomplete:
+        row["rollback_incomplete"] = snapshot.incomplete
+    row["action"] = action
+
+
 def _repair_round(root: Path, spec: HarnessSpec, failures, attempt: int, seen: set) -> tuple[dict, list, str]:
-    """One guarded repair attempt. Returns (receipt row, failures after, stop reason or "")."""
+    """One guarded repair attempt. Returns (receipt row, failures after, stop reason or "").
+
+    A repair is kept only when the guard passes and the set of failing required gates strictly shrinks;
+    verification after a repair never reads the gate cache.
+    """
     store = Path(root) / WORK_DIR / f"snapshot-{attempt}"
-    before = guard.tree_digests(root)
+    before = _digests(root, spec)
     snapshot = guard.Snapshot(root, store, before)
-    report = _failure_report(root, spec, failures, attempt)
-    repair = _invoke_repair(root, spec, report)
-    verdict = guard.check(before, guard.tree_digests(root), protected=spec.protected, mutable=spec.mutable)
-    row: dict[str, Any] = {"round": attempt, "classification": sorted({run.classification for run in failures}),
-           "repair": repair, "guard": verdict.summary()}
-    if not verdict.ok:
-        row["rolled_back"] = snapshot.restore(guard.tree_digests(root))
-        row["action"] = "rollback:guard"
+    row: dict[str, Any] = {"round": attempt, "classification": sorted({run.classification for run in failures})}
+    try:
+        row["repair"] = _invoke_repair(root, spec, _failure_report(root, spec, failures, attempt))
+        verdict = guard.check(before, _digests(root, spec), protected=spec.protected, mutable=spec.mutable,
+                              unobserved=spec.unobserved, root=root, store=store)
+        row["guard"] = verdict.summary()
+        if not verdict.ok:
+            _rollback(row, snapshot, root, spec, "rollback:guard")
+            return row, failures, ""
+        runs, after = _verify(root, spec, use_cache=False)
+        row["gates"] = [run.summary() for run in runs]
+        before_gates, after_gates = {run.gate for run in failures}, {run.gate for run in after}
+        if after_gates < before_gates:
+            seen.add(_signatures(after))
+            row["action"] = "keep"
+            row["kept_changes"] = {path: {"before_sha256": before.get(path), "after_sha256": digest}
+                                   for path, digest in _digests(root, spec).items()
+                                   if path in verdict.changed}
+            return row, after, ""
+        _rollback(row, snapshot, root, spec, "rollback:no_improvement")
+        signatures = _signatures(after)
+        stop = "oscillation" if after and signatures != _signatures(failures) and signatures in seen else ""
+        return row, failures, stop
+    except BaseException:
+        _rollback(row, snapshot, root, spec, "rollback:interrupted")
+        raise
+    finally:
         snapshot.discard()
-        return row, failures, ""
-    runs, after = _verify(root, spec)
-    row["gates"] = [run.summary() for run in runs]
-    signatures = _signatures(after)
-    if after and signatures != _signatures(failures) and signatures in seen:
-        row["rolled_back"] = snapshot.restore(guard.tree_digests(root))
-        row["action"] = "rollback:oscillation"
-        snapshot.discard()
-        return row, failures, "oscillation"
-    before_gates, after_gates = {run.gate for run in failures}, {run.gate for run in after}
-    if after_gates < before_gates or (after_gates == before_gates and signatures not in seen):
-        seen.add(signatures)
-        row["action"] = "keep"
-        row["kept_changes"] = {path: sha256((Path(root) / path).read_bytes()).hexdigest()
-                               for path in verdict.changed if (Path(root) / path).is_file()}
-        snapshot.discard()
-        return row, after, ""
-    row["rolled_back"] = snapshot.restore(guard.tree_digests(root))
-    row["action"] = "rollback:no_improvement"
-    snapshot.discard()
-    return row, failures, ""
 
 
 def heal(root: Path, spec: HarnessSpec) -> dict:

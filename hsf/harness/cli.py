@@ -7,11 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .gates import failing, run_gates
-from .heal import append_progress, heal
-from .ledger import Feature, Ledger
-from .scaffold import init_harness, protected_drift, seal_protected
-from .spec import load_harness
+# Imports of the harness modules (and pydantic) are deferred to the command that needs them, so other
+# `hsf` commands do not pay for them.
 
 
 def _emit(payload: dict, as_json: bool, lines: list[str]) -> None:
@@ -19,6 +16,7 @@ def _emit(payload: dict, as_json: bool, lines: list[str]) -> None:
 
 
 def cmd_init(args) -> int:
+    from .scaffold import init_harness
     for path in init_harness(args.name, Path(args.root), target=args.target, with_cf=not args.no_cf):
         print(f"created {path}")
     print("next: edit harness/harness.yaml (gates, mutable paths, repair.command), run "
@@ -27,6 +25,9 @@ def cmd_init(args) -> int:
 
 
 def status_payload(root: Path) -> dict:
+    from .ledger import Ledger
+    from .scaffold import protected_drift
+    from .spec import load_harness
     spec = load_harness(root)
     ledger = Ledger(root / spec.features_path)
     payload: dict[str, Any] = {"cwd": str(root.resolve()), "harness": spec.harness, "target": spec.target}
@@ -57,9 +58,28 @@ def cmd_status(args) -> int:
     return 0 if payload["ledger_ok"] and payload["protected_ok"] else 3
 
 
+def _seals_broken(root: Path, spec) -> list[str]:
+    """Problems with the ledger seal or protected-file seal; empty when both hold."""
+    from .ledger import Ledger
+    from .scaffold import protected_drift
+    problems = [f"protected file changed: {path}" for path in protected_drift(root, spec)]
+    try:
+        Ledger(root / spec.features_path).verify()
+    except (OSError, ValueError) as exc:
+        problems.append(f"ledger: {exc}")
+    return problems
+
+
 def cmd_check(args) -> int:
+    from .gates import failing, run_gates
+    from .spec import load_harness
     root = Path(args.root)
     spec = load_harness(root)
+    broken = _seals_broken(root, spec)
+    if broken and not args.allow_drift:
+        print("refusing to run gates: " + "; ".join(broken) + " (use --allow-drift to run anyway)", file=sys.stderr)
+        return 3
+    args.no_cache = args.no_cache or bool(os.environ.get("CI"))
     runs = run_gates(spec.gates, root, only=args.gate or None, parallel=spec.parallel_gates,
                      use_cache=not args.no_cache)
     bad = failing(runs, spec.gates)
@@ -70,6 +90,9 @@ def cmd_check(args) -> int:
 
 
 def cmd_heal(args) -> int:
+    from .heal import heal
+    from .scaffold import protected_drift
+    from .spec import load_harness
     root = Path(args.root)
     spec = load_harness(root)
     if args.repair_command:
@@ -89,8 +112,17 @@ def cmd_heal(args) -> int:
 
 
 def cmd_pass(args) -> int:
+    from .gates import run_gates
+    from .heal import append_progress
+    from .ledger import Ledger
+    from .scaffold import ledger_paths, protected_drift, seal_protected
+    from .spec import load_harness
     root = Path(args.root)
     spec = load_harness(root)
+    drift = protected_drift(root, spec, ignore=ledger_paths(spec))
+    if drift:
+        print(f"refusing to mark: protected files changed since sealing: {', '.join(drift)}", file=sys.stderr)
+        return 3
     ledger = Ledger(root / spec.features_path)
     feature = next((f for f in ledger.verify() if f.id == args.feature), None)
     if feature is None:
@@ -98,13 +130,13 @@ def cmd_pass(args) -> int:
         return 2
     runs = run_gates(spec.gates, root, only=feature.gates, use_cache=False)
     missing = sorted(set(feature.gates) - {run.gate for run in runs})
-    bad = [run for run in runs if not run.passed]
+    bad = [run for run in runs if not run.passed or run.classification != "ok"]
     if missing or bad:
         print(f"{feature.id} not marked: failing {[r.gate for r in bad]} missing {missing}", file=sys.stderr)
         append_progress(root, spec, "pass_refused", feature=feature.id, failing=[r.gate for r in bad])
         return 1
     ledger.set_passes(feature.id, True)
-    seal_protected(root, spec)
+    seal_protected(root, spec, only=ledger_paths(spec))
     append_progress(root, spec, "pass", feature=feature.id, gates=[r.summary()["gate"] for r in runs],
                     actor=os.environ.get("USER", "unknown"))
     print(f"{feature.id} passes ({', '.join(r.gate for r in runs)})")
@@ -112,20 +144,32 @@ def cmd_pass(args) -> int:
 
 
 def cmd_add_feature(args) -> int:
+    from .heal import append_progress
+    from .ledger import Feature, Ledger
+    from .scaffold import ledger_paths, protected_drift, seal_protected
+    from .spec import load_harness
     root = Path(args.root)
     spec = load_harness(root)
+    drift = protected_drift(root, spec, ignore=ledger_paths(spec))
+    if drift:
+        print(f"refusing to add: protected files changed since sealing: {', '.join(drift)}", file=sys.stderr)
+        return 3
     for gate in args.gate:
         spec.gate(gate)
     feature = Feature(id=args.id, category=args.category, description=args.description, steps=args.step,
                       gates=args.gate, priority=args.priority)
     Ledger(root / spec.features_path).add(feature)
-    seal_protected(root, spec)
+    seal_protected(root, spec, only=ledger_paths(spec))
     append_progress(root, spec, "add_feature", feature=feature.id)
     print(f"added {feature.id}")
     return 0
 
 
 def cmd_seal(args) -> int:
+    from .heal import append_progress
+    from .ledger import Ledger
+    from .scaffold import protected_drift, seal_protected
+    from .spec import load_harness
     root = Path(args.root)
     spec = load_harness(root)
     drift = protected_drift(root, spec)
@@ -147,6 +191,7 @@ def register(sub) -> None:
     s = hs.add_parser("status"); s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_status)
     s = hs.add_parser("check"); s.add_argument("--gate", action="append"); s.add_argument("--json", action="store_true")
     s.add_argument("--no-cache", action="store_true", help="re-run gates even when their inputs are unchanged")
+    s.add_argument("--allow-drift", action="store_true", help="run gates even if protected files or the ledger changed")
     s.set_defaults(fn=cmd_check)
     s = hs.add_parser("heal"); s.add_argument("--repair-command"); s.add_argument("--max-attempts", type=int)
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_heal)

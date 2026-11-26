@@ -37,8 +37,11 @@ class HarnessSpec(BaseModel):
     target: Literal["worker", "web", "mobile", "agent-ui", "generic"] = "generic"
     init: list[str] = Field(default_factory=list)
     gates: list[GateSpec] = Field(min_length=1)
-    protected: list[str] = Field(default_factory=lambda: ["tests/**", "goldens/**", "specs/**", "harness/harness.yaml",
-                                                         "harness/features.json", "harness/*.lock.json"])
+    protected: list[str] = Field(default_factory=lambda: [
+        "tests/**", "test/**", "e2e/**", "goldens/**", "specs/**", "**/*.test.*", "**/*.spec.*", "**/__tests__/**",
+        "**/conftest.py", "pytest.ini", "harness/harness.yaml", "harness/features.json", "harness/*.lock.json"])
+    unobserved: list[str] = Field(default_factory=lambda: ["node_modules", "__pycache__", ".pytest_cache",
+                                                          ".mypy_cache", ".next", ".expo"])
     mutable: list[str] = Field(min_length=1)
     repair: RepairPolicy = Field(default_factory=RepairPolicy)
     features_path: str = "harness/features.json"

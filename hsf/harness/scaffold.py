@@ -68,21 +68,51 @@ def _spec_payload(name: str, target: str, with_cf: bool) -> dict[str, Any]:
             "repair": {"command": None, "max_attempts": 3}}
 
 
-def seal_protected(root: Path, spec: HarnessSpec) -> dict[str, str]:
-    """Record digests of every protected file that exists now."""
-    digests = {path: digest for path, digest in tree_digests(root).items()
-               if matches(path, spec.protected) and not path.endswith(PROTECTED_LOCK)}
-    lock = Path(root) / "harness" / PROTECTED_LOCK
-    lock.write_text(json.dumps(digests, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return digests
+def _protected_now(root: Path, spec: HarnessSpec) -> dict[str, str]:
+    return {path: digest for path, digest in tree_digests(root, spec.protected).items()
+            if matches(path, spec.protected) and not path.endswith(PROTECTED_LOCK)}
 
 
-def protected_drift(root: Path, spec: HarnessSpec) -> list[str]:
+def _lock_path(root: Path) -> Path:
+    return Path(root) / "harness" / PROTECTED_LOCK
+
+
+def ledger_paths(spec: HarnessSpec) -> list[str]:
+    """The two protected files the harness itself rewrites: the ledger and its seal."""
+    return [spec.features_path, str(Path(spec.features_path).parent / "ledger.lock.json").replace("\\", "/")]
+
+
+def seal_protected(root: Path, spec: HarnessSpec, only=None) -> dict[str, str]:
+    """Record digests of protected files. With `only`, update just those paths and keep every other seal."""
+    current = _protected_now(root, spec)
+    lock = _lock_path(root)
+    if only is None or not lock.exists():
+        sealed = current
+    else:
+        sealed = json.loads(lock.read_text(encoding="utf-8"))
+        for path in only:
+            if path in current:
+                sealed[path] = current[path]
+            else:
+                sealed.pop(path, None)
+    lock.write_text(json.dumps(sealed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return sealed
+
+
+def protected_drift(root: Path, spec: HarnessSpec, ignore=()) -> list[str]:
     """Protected files whose bytes differ from the sealed lock (added, changed or removed)."""
-    sealed = json.loads((Path(root) / "harness" / PROTECTED_LOCK).read_text(encoding="utf-8"))
-    current = {path: digest for path, digest in tree_digests(root).items()
-               if matches(path, spec.protected) and not path.endswith(PROTECTED_LOCK)}
-    return sorted(path for path in set(sealed) | set(current) if sealed.get(path) != current.get(path))
+    sealed = json.loads(_lock_path(root).read_text(encoding="utf-8"))
+    current = _protected_now(root, spec)
+    return sorted(path for path in set(sealed) | set(current)
+                  if sealed.get(path) != current.get(path) and path not in ignore)
+
+
+def _ignore_work_dir(root: Path) -> None:
+    gitignore = Path(root) / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".hsf-harness/" not in text.splitlines():
+        gitignore.write_text(text + ("" if not text or text.endswith("\n") else "\n") + ".hsf-harness/\n",
+                             encoding="utf-8")
 
 
 def init_harness(name: str, root: Path = Path("."), target: str = "generic", with_cf: bool = True) -> list[Path]:
@@ -107,5 +137,6 @@ def init_harness(name: str, root: Path = Path("."), target: str = "generic", wit
     init_sh.chmod(0o755)
     (root / "AGENTS.md").write_text(AGENTS_MD.format(name=name, repair_hint=REPAIR_HINT), encoding="utf-8") if not (
         root / "AGENTS.md").exists() else None
+    _ignore_work_dir(root)
     seal_protected(root, spec)
     return [spec_path, root / spec.features_path, init_sh, base / PROTECTED_LOCK]

@@ -125,22 +125,15 @@ def test_heal_rolls_back_a_repair_that_does_not_help(tmp_path):
     assert (app / "src" / "calc.py").read_text() == BUGGY
 
 
-def test_heal_stops_on_oscillation(tmp_path):
+def test_heal_rolls_back_a_repair_that_only_changes_the_failure(tmp_path):
+    """HH-5: a different error in the same failing gate is not progress; the tree ends as it started."""
     app = _app(tmp_path)
-    counter = tmp_path / ".hsf-harness" / "count"
-    flip = tmp_path / ".hsf-harness" / "flip.py"
-    flip.parent.mkdir(exist_ok=True)
-    flip.write_text(
-        "from pathlib import Path\n"
-        f"c = Path({str(counter)!r}); n = int(c.read_text()) if c.exists() else 0; c.write_text(str(n + 1))\n"
-        "Path('src/calc.py').write_text('def add(a, b):\\n    raise ValueError(\"x\")\\n' if n % 2 == 0 else "
-        f"{BUGGY!r})\n")
     spec = load_harness(app)
-    spec.repair.command = f'{PY} "{flip}"'
+    spec.repair.command = _writer(tmp_path, "other", "src/calc.py", 'def add(a, b):\n    raise ValueError("x")\n')
+    spec.repair.max_attempts = 2
     receipt = heal(app, spec)
-    actions = [row["action"] for row in receipt["rounds"][1:]]
-    assert actions[0] == "keep" and actions[-1] == "rollback:oscillation"
-    assert receipt["stop_reason"] == "oscillation"
+    assert {row["action"] for row in receipt["rounds"][1:]} == {"rollback:no_improvement"}
+    assert receipt["status"] == "unhealthy" and (app / "src" / "calc.py").read_text() == BUGGY
 
 
 def test_environment_failure_is_healed_by_reinit(tmp_path):
@@ -241,3 +234,148 @@ def test_cli_seal_records_owner_edits(tmp_path):
     assert protected_drift(app, load_harness(app)) == []
     last = json.loads((app / "harness" / "progress.jsonl").read_text().splitlines()[-1])
     assert last["event"] == "seal" and last["files"] == ["harness/harness.yaml"] and last["reason"] == "configure gates"
+
+
+# --- Hardening: each test reproduces a reported way to weaken the oracle unnoticed. ---
+
+def _script(tmp_path: Path, name: str, body: str) -> str:
+    script = tmp_path / ".hsf-harness" / f"{name}.py"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text("import os\nfrom pathlib import Path\n" + body)
+    return f'{PY} "{script}"'
+
+
+def test_pass_and_add_feature_refuse_when_a_test_was_weakened(tmp_path):
+    """HH-1: marking a feature must not re-seal a protected file someone weakened."""
+    app = _app(tmp_path, source=FIXED)
+    lock = app / "harness" / "protected.lock.json"
+    sealed = lock.read_bytes()
+    (app / "tests" / "test_calc.py").write_text("def test_add():\n    assert True\n")
+    for argv in (["harness", "pass", "F001"],
+                 ["harness", "add-feature", "F009", "--description", "x", "--step", "y", "--gate", "unit"]):
+        with pytest.raises(SystemExit) as refused:
+            main([*argv, "--root", str(app)])
+        assert refused.value.code == 3
+    assert lock.read_bytes() == sealed
+    assert protected_drift(app, load_harness(app)) == ["tests/test_calc.py"]
+
+
+def test_check_refuses_to_run_gates_over_broken_seals(tmp_path):
+    """HH-4: a CI `check` must notice an edited test before reporting green."""
+    app = _app(tmp_path, source=FIXED)
+    (app / "tests" / "test_calc.py").write_text("def test_add():\n    assert True\n")
+    with pytest.raises(SystemExit) as refused:
+        main(["harness", "check", "--root", str(app)])
+    assert refused.value.code == 3
+    main(["harness", "check", "--allow-drift", "--root", str(app)])
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "symlink"), reason="symlinks unavailable")
+def test_symlinked_conftest_that_skips_tests_is_rolled_back(tmp_path):
+    """HH-2: a mutable file linked into the test tree must not pass the guard."""
+    app = _app(tmp_path)
+    spec = load_harness(app)
+    spec.repair.command = _script(tmp_path, "link", (
+        "Path('src/_hook.py').write_text('import pytest\\n')\n"
+        "Path('src/calc.py').write_text(" + repr(FIXED) + ")\n"
+        "os.symlink(os.path.join('..', 'src', '_hook.py'), os.path.join('tests', 'conftest.py'))\n"))
+    try:
+        receipt = heal(app, spec)
+    except OSError:
+        pytest.skip("symlink creation not permitted")
+    row = receipt["rounds"][1]
+    assert row["action"] == "rollback:guard" and "tests/conftest.py" in row["guard"]["protected_touched"]
+    assert not (app / "tests" / "conftest.py").is_symlink() and not (app / "src" / "_hook.py").exists()
+
+
+def test_writes_into_skipped_directories_are_seen_and_undone(tmp_path):
+    """HH-2: .venv/ and build/ are not digested file by file, but a repair writing there is still caught."""
+    app = _app(tmp_path)
+    (app / ".venv").mkdir()
+    (app / ".venv" / "existing.txt").write_text("keep")
+    spec = load_harness(app)
+    spec.repair.command = _script(tmp_path, "venv", (
+        "Path('src/calc.py').write_text(" + repr(FIXED) + ")\n"
+        "Path('.venv/conftest_plugin.py').write_text('x')\n"))
+    receipt = heal(app, spec)
+    row = receipt["rounds"][1]
+    assert row["action"] == "rollback:guard" and ".venv/" in row["guard"]["outside_mutable"]
+    assert not (app / ".venv" / "conftest_plugin.py").exists() and (app / ".venv" / "existing.txt").exists()
+
+
+def test_protected_files_inside_skip_named_directories_are_sealed(tmp_path):
+    """HH-2: tests/build/** is still protected even though `build` directories are normally skipped."""
+    app = _app(tmp_path, source=FIXED)
+    (app / "tests" / "build").mkdir()
+    (app / "tests" / "build" / "test_more.py").write_text("def test_x():\n    assert 1\n")
+    from hsf.harness.scaffold import seal_protected
+    seal_protected(app, load_harness(app))
+    (app / "tests" / "build" / "test_more.py").write_text("def test_x():\n    pass\n")
+    assert protected_drift(app, load_harness(app)) == ["tests/build/test_more.py"]
+
+
+def test_a_forged_gate_cache_cannot_heal(tmp_path):
+    """HH-3: a repair that only writes a passing cache entry must not make the run healthy."""
+    app = _app(tmp_path)
+    spec_file = app / "harness" / "harness.yaml"
+    payload = yaml.safe_load(spec_file.read_text())
+    payload["gates"][0]["inputs"] = ["src/**"]
+    spec_file.write_text(yaml.safe_dump(payload))
+    from hsf.harness.scaffold import seal_protected
+    seal_protected(app, load_harness(app))
+    spec = load_harness(app)
+    from hsf.harness.gates import CACHE_PATH, cache_key
+    forged = json.dumps({"unit": cache_key(spec.gates[0], app)})
+    spec.repair.command = _script(tmp_path, "forge", f"Path({CACHE_PATH!r}).write_text({forged!r})\n")
+    receipt = heal(app, spec)
+    assert receipt["status"] == "unhealthy"
+    assert receipt["rounds"][1]["action"] == "rollback:guard"
+    assert ".hsf-harness/gate-cache.json" in receipt["rounds"][1]["guard"]["protected_touched"]
+    assert ".hsf-harness/" in (app / ".gitignore").read_text()
+
+
+def test_code_factory_evidence_is_append_only_for_repairs(tmp_path):
+    """HH-6: new tool evidence (factory wrap, doctor) is allowed; rewriting existing evidence is not."""
+    app = _app(tmp_path)
+    (app / "receipts").mkdir()
+    (app / "receipts" / "old.json").write_text("{}")
+    spec = load_harness(app)
+    spec.repair.command = _script(tmp_path, "cf", (
+        "Path('src/calc.py').write_text(" + repr(FIXED) + ")\n"
+        "Path('.factory/ops').mkdir(parents=True, exist_ok=True)\n"
+        "Path('.factory/ops/lifecycle.json').write_text('{}')\n"))
+    kept = heal(app, spec)
+    assert kept["status"] == "healthy" and (app / ".factory" / "ops" / "lifecycle.json").exists()
+    (app / "src" / "calc.py").write_text(BUGGY)
+    spec.repair.command = _script(tmp_path, "rewrite", (
+        "Path('src/calc.py').write_text(" + repr(FIXED) + ")\n"
+        "Path('receipts/old.json').write_text('{\"forged\": true}')\n"))
+    rejected = heal(app, spec)
+    assert rejected["rounds"][1]["action"] == "rollback:guard"
+    assert rejected["rounds"][1]["guard"]["evidence_rewritten"] == ["receipts/old.json"]
+    assert (app / "receipts" / "old.json").read_text() == "{}"
+
+
+def test_pass_refuses_a_flaky_gate(tmp_path):
+    """A feature is marked only on a clean, non-flaky pass."""
+    app = _app(tmp_path, source=FIXED)
+    counter = tmp_path / "flaky-count"
+    spec_file = app / "harness" / "harness.yaml"
+    payload = yaml.safe_load(spec_file.read_text())
+    payload["gates"] = [{"id": "unit", "kind": "unit", "flake_retries": 1, "run": PY + " -c \"from pathlib import Path; "
+                         f"p = Path(r'{counter}'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); "
+                         "raise SystemExit(0 if n % 2 else 1)\""}]
+    spec_file.write_text(yaml.safe_dump(payload))
+    from hsf.harness.scaffold import seal_protected
+    seal_protected(app, load_harness(app))
+    with pytest.raises(SystemExit) as refused:
+        main(["harness", "pass", "F001", "--root", str(app)])
+    assert refused.value.code == 1
+
+
+def test_harness_import_is_lazy():
+    """HH-11: non-harness commands do not import the harness modules or pydantic through it."""
+    import subprocess
+    code = ("import sys, hsf.harness.cli; "
+            "sys.exit(int(any(m in sys.modules for m in ('hsf.harness.spec', 'hsf.harness.ledger', 'pydantic'))))")
+    assert subprocess.run([sys.executable, "-c", code]).returncode == 0
