@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ast
 import json
-import re
 
 from hsf.foundry.compiler import compile_spec
 from hsf.gates.g4_accuracy import run as accuracy_gate
@@ -11,7 +11,21 @@ from hsf.runtime.injection import scan_codes
 from hsf.spec import load_spec
 
 
-_DECISION_RETURN = re.compile(r'return AuthResult\("(?P<status>[^"]+)", "(?P<reason>[^"]+)"\)')
+def _decision_statuses(source: str) -> dict[int, ast.Constant]:
+    """Line number -> status literal of every `return AuthResult(<str>, <str>)`, found with ast (quotes and
+    escapes in a reason cannot hide or fake a return site)."""
+    found = {}
+    for node in ast.walk(ast.parse(source)):
+        call = node.value if isinstance(node, ast.Return) else None
+        if (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "AuthResult" and len(call.args) == 2
+                and all(isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in call.args)
+                and call.args[0].lineno == call.args[0].end_lineno):
+            found[call.args[0].lineno] = call.args[0]
+    return found
+
+
+def _char_col(line: str, byte_col: int) -> int:
+    return len(line.encode("utf-8")[:byte_col].decode("utf-8"))
 
 
 def _goldens(path: Path) -> list[dict]:
@@ -26,21 +40,23 @@ def challenge_spec(spec_path: Path, golden_path: Path | None = None) -> dict:
     cases = _goldens(golden_path)
     mutations = []
     matches = []
+    statuses = _decision_statuses(source)
     offset = 0
     pending_trace = None
-    for line in source.splitlines(keepends=True):
+    for lineno, line in enumerate(source.splitlines(keepends=True), 1):
         if "trace=" in line:
             pending_trace = line.split("trace=", 1)[-1].strip()
-        match = _DECISION_RETURN.search(line)
-        if match and pending_trace and ".rules[" in pending_trace:
-            matches.append((offset + match.start(), offset + match.end(), match, pending_trace))
+        status = statuses.get(lineno)
+        if status is not None and pending_trace and ".rules[" in pending_trace:
+            start = offset + _char_col(line, status.col_offset)
+            end = offset + _char_col(line, status.end_col_offset or status.col_offset)
+            matches.append((start, end, pending_trace))
             pending_trace = None
-        elif match:
+        elif status is not None:
             pending_trace = None
         offset += len(line)
-    for index, (start, end, match, trace) in enumerate(matches, 1):
-        replacement = f'return AuthResult("__MUTANT_{index}__", "{match.group("reason")}")'
-        mutant = source[:start] + replacement + source[end:]
+    for index, (start, end, trace) in enumerate(matches, 1):
+        mutant = source[:start] + json.dumps(f"__MUTANT_{index}__") + source[end:]
         result = accuracy_gate(mutant, cases)
         mutations.append({
             "unit": f"decision_rule:{index}",

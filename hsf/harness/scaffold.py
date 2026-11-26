@@ -14,24 +14,30 @@ from .spec import HarnessSpec
 
 PROTECTED_LOCK = "protected.lock.json"
 
+_NODE_LINT = {"id": "lint", "kind": "lint", "run": "npm run lint", "npm_script": "lint"}
+_NODE_TEST = {"id": "unit", "kind": "unit", "run": "npm test", "npm_script": "test"}
+_PLAYWRIGHT = {"id": "e2e", "kind": "e2e", "run": "npx playwright test", "timeout_s": 1800}
+_PY_LINT = {"id": "lint", "kind": "lint", "run": "python -m ruff check ."}
+_PY_TEST = {"id": "unit", "kind": "unit", "run": "python -m pytest -q"}
+# Gates never use `--if-present`: a missing script must fail, not pass with nothing to run (HH-7).
 TARGET_GATES: dict[str, list[dict[str, Any]]] = {
-    "worker": [{"id": "lint", "kind": "lint", "run": "python -m ruff check ."},
-               {"id": "unit", "kind": "unit", "run": "python -m pytest -q"}],
-    "web": [{"id": "lint", "kind": "lint", "run": "npm run lint --if-present"},
-            {"id": "unit", "kind": "unit", "run": "npm test --if-present"},
-            {"id": "e2e", "kind": "e2e", "run": "npx playwright test", "timeout_s": 1800}],
-    "mobile": [{"id": "lint", "kind": "lint", "run": "npm run lint --if-present"},
-               {"id": "type", "kind": "type", "run": "npx tsc --noEmit"},
-               {"id": "unit", "kind": "unit", "run": "npm test --if-present"}],
-    "agent-ui": [{"id": "unit", "kind": "unit", "run": "npm test --if-present"},
-                 {"id": "e2e", "kind": "e2e", "run": "npx playwright test", "timeout_s": 1800}],
-    "generic": [{"id": "unit", "kind": "unit", "run": "python -m pytest -q"}],
+    "worker": [_PY_LINT, _PY_TEST],
+    "web": [_NODE_LINT, _NODE_TEST, _PLAYWRIGHT],
+    "mobile": [_NODE_LINT, {"id": "type", "kind": "type", "run": "npx tsc --noEmit"}, _NODE_TEST],
+    "agent-ui": [_NODE_TEST, _PLAYWRIGHT],
+    "api": [_PY_LINT, _PY_TEST],
+    "cli": [_PY_LINT, _PY_TEST],
+    "mcp": [_PY_LINT, _PY_TEST],
+    "generic": [_PY_TEST],
 }
 TARGET_INIT = {"worker": ["python -m pip install -e ."], "web": ["npm ci"], "mobile": ["npm ci"],
-               "agent-ui": ["npm ci"], "generic": []}
+               "agent-ui": ["npm ci"], "api": ["python -m pip install -e ."], "cli": ["python -m pip install -e ."],
+               "mcp": ["python -m pip install -e ."], "generic": []}
 TARGET_MUTABLE = {"worker": ["src/**", "app/**"], "web": ["src/**", "app/**", "components/**", "pages/**"],
                   "mobile": ["src/**", "app/**", "components/**"], "agent-ui": ["src/**", "app/**"],
-                  "generic": ["src/**"]}
+                  "api": ["src/**", "app/**"], "cli": ["src/**"], "mcp": ["src/**"], "generic": ["src/**"]}
+AGENTS_START, AGENTS_END = "<!-- hsf-harness:start -->", "<!-- hsf-harness:end -->"
+
 
 AGENTS_MD = """# Harness rules for {name}
 
@@ -61,11 +67,40 @@ validated evidence session:
 """
 
 
-def _spec_payload(name: str, target: str, with_cf: bool) -> dict[str, Any]:
-    gates = [dict(gate) for gate in TARGET_GATES[target]] + (available_cf_gates() if with_cf else [])
-    return {"harness": name, "version": 1, "target": target, "init": TARGET_INIT[target],
+def _missing_npm_scripts(root: Path, gates: list[dict[str, Any]]) -> list[str]:
+    package = Path(root) / "package.json"
+    if not package.is_file():
+        return []
+    scripts = (json.loads(package.read_text(encoding="utf-8")) or {}).get("scripts") or {}
+    return [gate["npm_script"] for gate in gates if gate.get("npm_script") and gate["npm_script"] not in scripts]
+
+
+def _spec_payload(name: str, target: str, cf_mode: str, root: Path) -> dict[str, Any]:
+    gates = [dict(gate) for gate in TARGET_GATES[target]]
+    missing = _missing_npm_scripts(root, gates)
+    if missing:
+        raise ValueError(f"package.json has no {', '.join(repr(m) for m in missing)} script; add it or edit the "
+                         "gates in harness/harness.yaml after init (gates never pass when a script is missing)")
+    for gate in gates:
+        gate.pop("npm_script", None)
+    gates += available_cf_gates(mode=cf_mode)
+    return {"harness": name, "version": 1, "target": target, "code_factory": cf_mode, "init": TARGET_INIT[target],
             "gates": gates, "mutable": TARGET_MUTABLE[target], "parallel_gates": min(4, len(gates)),
             "repair": {"command": None, "max_attempts": 3}}
+
+
+def write_agent_rules(root: Path, name: str) -> Path:
+    """Write the harness rules as a delimited block, appended to (or refreshed in) an existing AGENTS.md (HH-12)."""
+    path = Path(root) / "AGENTS.md"
+    block = f"{AGENTS_START}\n{AGENTS_MD.format(name=name, repair_hint=REPAIR_HINT).rstrip()}\n{AGENTS_END}\n"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if AGENTS_START in text and AGENTS_END in text:
+        head, rest = text.split(AGENTS_START, 1)
+        text = head + block + rest.split(AGENTS_END, 1)[1].lstrip("\n")
+    else:
+        text = text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + block
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def _protected_now(root: Path, spec: HarnessSpec) -> dict[str, str]:
@@ -115,7 +150,8 @@ def _ignore_work_dir(root: Path) -> None:
                              encoding="utf-8")
 
 
-def init_harness(name: str, root: Path = Path("."), target: str = "generic", with_cf: bool = True) -> list[Path]:
+def init_harness(name: str, root: Path = Path("."), target: str = "generic", with_cf: bool | None = None,
+                 cf_mode: str | None = None) -> list[Path]:
     root = Path(root)
     base = root / "harness"
     spec_path = base / "harness.yaml"
@@ -123,20 +159,20 @@ def init_harness(name: str, root: Path = Path("."), target: str = "generic", wit
         raise FileExistsError(f"{spec_path} already exists")
     if target not in TARGET_GATES:
         raise ValueError(f"unknown target {target!r}; choose one of {sorted(TARGET_GATES)}")
+    mode = cf_mode or ("auto" if with_cf in (None, True) else "off")
+    payload = _spec_payload(name, target, mode, root)
     base.mkdir(parents=True, exist_ok=True)
-    payload = _spec_payload(name, target, with_cf)
     spec = HarnessSpec.model_validate(payload)
     spec_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     first = Feature(id="F001", category="foundation", description="The app starts and its gates pass.",
-                    steps=["Run harness/init.sh", "Run hsf harness check"], gates=[g.id for g in spec.gates],
-                    priority=1)
+                    steps=["Run harness/init.sh", "Run hsf harness check"],
+                    gates=[g.id for g in spec.gates if g.required], priority=1)
     Ledger(root / spec.features_path).seal([first])
     (root / spec.progress_path).write_text("", encoding="utf-8")
     init_sh = base / "init.sh"
     init_sh.write_text("#!/usr/bin/env sh\nset -e\n" + "".join(f"{cmd}\n" for cmd in spec.init), encoding="utf-8")
     init_sh.chmod(0o755)
-    (root / "AGENTS.md").write_text(AGENTS_MD.format(name=name, repair_hint=REPAIR_HINT), encoding="utf-8") if not (
-        root / "AGENTS.md").exists() else None
+    write_agent_rules(root, name)
     _ignore_work_dir(root)
     seal_protected(root, spec)
     return [spec_path, root / spec.features_path, init_sh, base / PROTECTED_LOCK]

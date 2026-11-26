@@ -55,7 +55,7 @@ spec.yaml ─► Foundry (template | llm, 1 call) ─► 4 Gates ─► signed a
 ## 60-second wow
 
 ```bash
-pip install code-factory-3-compile==0.5.3
+pip install code-factory-3-compile
 hsf demo
 ```
 
@@ -86,7 +86,28 @@ hsf harness status                     # startup routine: ledger + protected-fil
 hsf harness check                      # run gates (parallel, input-digest cached, flake-aware)
 hsf harness heal --repair-command "my-agent fix"   # guarded repair loop, receipted
 hsf harness pass F001                  # marks a feature only after its own gates pass (never cached)
+hsf harness seed --from all --feature shop   # gates + features from SpecLine plans / ForgeLine smoke
+hsf harness seal --reason "..." --approver me --yes   # owner re-seal after editing protected files
 ```
+
+Guarantees the guard enforces, each with a regression test:
+- Protected files are byte-identical after a kept repair: tests, colocated `*.test.*` / `*.spec.*` /
+  `__tests__` / `conftest.py`, goldens, specs, the ledger text and gate commands.
+- Symlinks are never followed, and any new or changed link is rejected.
+- Writes into `.venv`, `build` and other skip-named directories are seen and undone.
+- Code Factory evidence (`.factory`, `.forge`, `receipts`, ...) is append-only.
+- The gate cache cannot be forged.
+- `check`, `pass`, `add-feature` and `seed` refuse to run over broken seals (exit 3).
+- An unhealthy heal restores the starting tree, unless `--keep-partial` is given.
+- Receipts are `hsf.harness-heal.v2`, and the progress log is a hash chain.
+
+With Code Factory installed:
+- `repair.verify_with: factory-journey` routes every kept repair through `factory journey heal-verify`. It fails closed when `factory` is absent.
+- `cache: factory-proofs` uses `factory proofs plan` / `record` to reuse proven gate runs.
+
+Other commands:
+- `hsf goldens-draft <spec>` drafts golden *inputs* (`expected: null`) for review. Compile never reads the draft.
+- `--root` on `compile`, `goldens`, `challenge` and `aku` keeps every output under one project root.
 
 `heal` re-runs `init` for environment failures, then gives the external repair command a failure report
 (`HSF_FAILURE_REPORT`). It keeps a repair only when protected files (tests, goldens, specs, the ledger

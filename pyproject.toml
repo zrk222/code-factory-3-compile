@@ -23,7 +23,7 @@ guards = ["bandit>=1.7", "presidio-analyzer>=2.2"]
 tokens = ["tiktoken>=0.7"]
 signing = ["cryptography>=43"]
 temporal = ["temporalio>=1.36.1,<2", "cryptography>=43"]
-dev = ["pytest>=8.0", "mypy>=1.8"]
+dev = ["pytest>=8.0", "mypy>=1.8", "cryptography>=43"]
 all = ["anthropic>=0.34", "fastapi>=0.110", "starlette<1.0", "uvicorn>=0.29", "httpx>=0.27", "bandit>=1.7", "presidio-analyzer>=2.2", "tiktoken>=0.7"]
 
 [project.scripts]

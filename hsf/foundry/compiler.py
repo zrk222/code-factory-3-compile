@@ -14,7 +14,7 @@ from pathlib import Path
 from jinja2 import Environment, StrictUndefined
 from hsf.spec.models import SpecModel, FieldSpec
 
-TEMPLATE_VERSION = "wf-1"
+TEMPLATE_VERSION = "wf-2"
 
 class CompileError(RuntimeError):
     def __init__(self, msg: str, evidence: list | None = None):
@@ -35,9 +35,9 @@ def _bounds_guards(spec: SpecModel) -> tuple[list[dict], str]:
                 continue
             conds = []
             if fs.min is not None:
-                conds.append(f"extracted['{field}'] > {fs.min}")
+                conds.append(f"extracted['{field}'] {'>=' if fs.min_inclusive else '>'} {fs.min}")
             if fs.max is not None:
-                conds.append(f"extracted['{field}'] < {fs.max}")
+                conds.append(f"extracted['{field}'] {'<=' if fs.max_inclusive else '<'} {fs.max}")
             if conds:
                 guards.append({
                     "expr": " and ".join(conds),
@@ -80,6 +80,8 @@ def _extract_schema_literal(spec: SpecModel) -> str:
                 d = {"type": fs.type}
                 if fs.min is not None: d["min"] = fs.min
                 if fs.max is not None: d["max"] = fs.max
+                if fs.min_inclusive: d["min_inclusive"] = True
+                if fs.max_inclusive: d["max_inclusive"] = True
                 out[k] = d
     return repr(out)
 

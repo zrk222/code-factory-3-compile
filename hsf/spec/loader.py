@@ -1,9 +1,39 @@
 """YAML -> SpecModel with fail-fast structural rules (no LLM involved)."""
 from __future__ import annotations
-import ast, hashlib, json
+import ast, hashlib, json, re
 from pathlib import Path
 import yaml
+from pydantic import ValidationError
 from .models import SpecModel
+
+_ENUM = re.compile(r"^\s*enum\[(?P<values>[^\]]*)\]\s*$")
+
+
+def _declared_statuses(spec) -> set[str] | None:
+    """Statuses listed in an output's `status: enum[...]`, or None when no output declares an enum."""
+    declared: set[str] = set()
+    found = False
+    for fields in spec.outputs.values():
+        match = _ENUM.match(str(fields.get("status", "")))
+        if match:
+            found = True
+            declared |= {value.strip() for value in match.group("values").split(",") if value.strip()}
+    return declared if found else None
+
+
+def _check_declared_statuses(spec) -> None:
+    """Every rule outcome must use a status the outputs declare (H-CON-2)."""
+    declared = _declared_statuses(spec)
+    if declared is None:
+        return
+    for step in spec.steps:
+        for rule in step.rules or []:
+            for outcome in (rule.then, rule.else_):
+                status = (outcome or {}).get("status")
+                if status is not None and status not in declared:
+                    raise SpecError("E_STATUS_UNDECLARED",
+                                    f"branch {step.id!r} returns status {status!r}, not in {sorted(declared)}")
+
 
 class SpecError(ValueError):
     def __init__(self, code: str, msg: str):
@@ -57,8 +87,14 @@ def load_spec(
         raise SpecError("E_SPEC_FORMAT", str(error)) from error
     if not isinstance(data, dict):
         raise SpecError("E_SPEC_FORMAT", "workflow spec must be a YAML mapping")
-    spec = SpecModel(**data)
+    try:
+        spec = SpecModel(**data)
+    except ValidationError as error:
+        details = "; ".join(f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
+                            for item in error.errors())
+        raise SpecError("E_SPEC_SCHEMA", details) from error
     sha = _spec_digest(data)
+    _check_declared_statuses(spec)
 
     produced: set[str] = set(spec.inputs.keys())
     step_ids: set[str] = set()

@@ -77,14 +77,14 @@ def test_workflow_identity_must_match_loaded_spec(artifact_source, spec_and_sha,
 def test_accuracy_uses_one_sandbox_observation(artifact_source, goldens, monkeypatch):
     from hsf.gates import g3_execution, g4_accuracy
 
-    real = g3_execution.subprocess.run
+    real = g3_execution.subprocess.Popen
     calls = []
 
     def tracked(*args, **kwargs):
         calls.append(args)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(g3_execution.subprocess, "run", tracked)
+    monkeypatch.setattr(g3_execution.subprocess, "Popen", tracked)
     report = g4_accuracy.run(artifact_source, goldens[:3])
     assert report.passed
     assert len(calls) == 1

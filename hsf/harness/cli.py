@@ -17,7 +17,8 @@ def _emit(payload: dict, as_json: bool, lines: list[str]) -> None:
 
 def cmd_init(args) -> int:
     from .scaffold import init_harness
-    for path in init_harness(args.name, Path(args.root), target=args.target, with_cf=not args.no_cf):
+    mode = "off" if args.no_cf else args.cf
+    for path in init_harness(args.name, Path(args.root), target=args.target, cf_mode=mode):
         print(f"created {path}")
     print("next: edit harness/harness.yaml (gates, mutable paths, repair.command), run "
           "`hsf harness seal --reason \"configure gates\"`, then `hsf harness status`")
@@ -80,13 +81,47 @@ def cmd_check(args) -> int:
         print("refusing to run gates: " + "; ".join(broken) + " (use --allow-drift to run anyway)", file=sys.stderr)
         return 3
     args.no_cache = args.no_cache or bool(os.environ.get("CI"))
+    from .gates import gate_env
     runs = run_gates(spec.gates, root, only=args.gate or None, parallel=spec.parallel_gates,
-                     use_cache=not args.no_cache)
+                     use_cache=not args.no_cache and spec.cache == "local", env=gate_env(spec.env_allow))
     bad = failing(runs, spec.gates)
-    payload = {"passed": not bad, "gates": [run.summary() for run in runs]}
+    regressed = _record_regressions(root, spec, runs) if not broken else []
+    payload = {"passed": not bad, "gates": [run.summary() for run in runs], "regressed_features": regressed,
+               "attribution": _check_attribution(runs)}
     lines = [f"{'PASS' if r.passed else 'FAIL'} {r.gate} [{r.classification}] {r.duration_s:.1f}s" for r in runs]
+    lines += [f"REGRESSED {feature} (passes reset to false)" for feature in regressed]
     _emit(payload, args.json, lines)
     return 0 if not bad else 1
+
+
+_ATTRIBUTION = {"timeout": "runtime_timeout", "environment": "runtime_crash", "build": "runtime_crash",
+                "verification": "wrong_output"}
+
+
+def _check_attribution(runs) -> dict:
+    """FactoryLine-readable attribution: one unit per gate (3.2 a)."""
+    units = [{"unit": f"harness:{run.gate}", "stage": "harness_check", "passed": run.passed,
+              "evidence": run.classification,
+              "failure_class": None if run.passed else _ATTRIBUTION.get(run.classification, "wrong_output")}
+             for run in runs]
+    return {"stage": "harness_check", "n_checked": len(units), "n_passed": sum(u["passed"] for u in units),
+            "units": units}
+
+
+def _record_regressions(root: Path, spec, runs) -> list[str]:
+    """A passing feature whose gate now fails goes back to passes=false, logged (HH-12)."""
+    from .heal import append_progress
+    from .ledger import Ledger
+    from .scaffold import ledger_paths, seal_protected
+    failed = {run.gate for run in runs if not run.passed}
+    ledger = Ledger(root / spec.features_path)
+    regressed = [f.id for f in ledger.verify() if f.passes and failed & set(f.gates)]
+    for feature_id in regressed:
+        ledger.set_passes(feature_id, False)
+        append_progress(root, spec, "regression", feature=feature_id, gates=sorted(failed))
+    if regressed:
+        seal_protected(root, spec, only=ledger_paths(spec))
+    return regressed
 
 
 def cmd_heal(args) -> int:
@@ -104,7 +139,7 @@ def cmd_heal(args) -> int:
     if drift:
         print(f"refusing to heal: protected files changed since sealing: {', '.join(drift)}", file=sys.stderr)
         return 3
-    receipt = heal(root, spec)
+    receipt = heal(root, spec, keep_partial=args.keep_partial)
     lines = [f"status: {receipt['status']} ({receipt['stop_reason']}) after {receipt['repair_attempts']} repair(s)",
              f"receipt: {receipt['path']}"]
     _emit(receipt, args.json, lines)
@@ -173,11 +208,86 @@ def cmd_seal(args) -> int:
     root = Path(args.root)
     spec = load_harness(root)
     drift = protected_drift(root, spec)
-    Ledger(root / spec.features_path).seal(Ledger(root / spec.features_path).load())
+    ledger = Ledger(root / spec.features_path)
+    removed = _removed_features(root, spec)
+    print(f"changed protected file(s): {', '.join(drift) or 'none'}")
+    if removed:
+        print(f"features removed from the ledger: {', '.join(removed)}")
+    if not args.yes and not sys.stdin.isatty():
+        print("refusing to seal without --yes when not on a terminal", file=sys.stderr)
+        return 3
+    if not args.yes and input("seal these changes? [y/N] ").strip().lower() != "y":
+        return 3
+    ledger.seal(ledger.load())
     seal_protected(root, spec)
-    append_progress(root, spec, "seal", reason=args.reason, files=drift,
-                    actor=os.environ.get("USER", "unknown"))
-    print(f"sealed {len(drift)} changed protected file(s): {', '.join(drift) or 'none'}")
+    append_progress(root, spec, "seal", reason=args.reason, approver=args.approver, files=drift,
+                    removed_features=removed)
+    print(f"sealed {len(drift)} changed protected file(s)")
+    return 0
+
+
+def _removed_features(root: Path, spec) -> list[str]:
+    """Features recorded by earlier progress events but no longer in the ledger."""
+    from .ledger import Ledger
+    progress = root / spec.progress_path
+    known = {"F001"}
+    if progress.exists():
+        for line in progress.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("event") in ("add_feature", "pass") and event.get("feature"):
+                known.add(event["feature"])
+            known.update(event.get("seeded_features") or [])
+    try:
+        current = {f.id for f in Ledger(root / spec.features_path).load()}
+    except (OSError, ValueError):
+        return []
+    return sorted(known - current)
+
+
+def cmd_seed(args) -> int:
+    """Seed gates and features from SpecLine plans and ForgeLine smoke manifests (3.2 e). Idempotent."""
+    import yaml
+    from .cf import SEED_PROTECTED, seed_from_forgeline, seed_from_specline
+    from .heal import append_progress
+    from .ledger import Ledger
+    from .scaffold import ledger_paths, protected_drift, seal_protected
+    from .spec import load_harness
+    root = Path(args.root)
+    spec = load_harness(root)
+    drift = protected_drift(root, spec, ignore=ledger_paths(spec))
+    if drift:
+        print(f"refusing to seed: protected files changed since sealing: {', '.join(drift)}", file=sys.stderr)
+        return 3
+    gates, features = [], []
+    for source, seeder in (("specline", seed_from_specline), ("forgeline", seed_from_forgeline)):
+        if args.source in (source, "all"):
+            new_gates, new_features = seeder(root, args.feature)
+            gates += new_gates
+            features += new_features
+    existing_gates = {gate.id for gate in spec.gates}
+    ledger = Ledger(root / spec.features_path)
+    existing_features = {feature.id for feature in ledger.verify()}
+    add_gates = [gate for gate in gates if gate.id not in existing_gates]
+    add_features = [feature for feature in features if feature.id not in existing_features]
+    payload = {"gates_added": [g.id for g in add_gates], "features_added": [f.id for f in add_features],
+               "dry_run": args.dry_run}
+    if not args.dry_run and (add_gates or add_features):
+        spec_file = root / "harness" / "harness.yaml"
+        data = yaml.safe_load(spec_file.read_text(encoding="utf-8"))
+        data["gates"] = data.get("gates", []) + [g.model_dump(exclude_defaults=True) | {"id": g.id, "run": g.run}
+                                                 for g in add_gates]
+        data["protected"] = sorted(set(data.get("protected") or spec.protected) | set(SEED_PROTECTED))
+        spec_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        for feature in add_features:
+            ledger.add(feature)
+        seal_protected(root, load_harness(root))
+        append_progress(root, spec, "seed", source=args.source, feature=args.feature,
+                        seeded_gates=payload["gates_added"], seeded_features=payload["features_added"])
+    _emit(payload, args.json, [f"added gate {g}" for g in payload["gates_added"]]
+          + [f"added feature {f}" for f in payload["features_added"]] or ["nothing new to seed"])
     return 0
 
 
@@ -185,8 +295,11 @@ def register(sub) -> None:
     h = sub.add_parser("harness", help="self-healing app harness: ledger, gates, guarded repair loop")
     hs = h.add_subparsers(required=True, dest="harness_cmd")
     s = hs.add_parser("init"); s.add_argument("name")
-    s.add_argument("--no-cf", action="store_true", help="do not add installed Code Factory gates (forge qa, factory scan)")
-    s.add_argument("--target", default="generic", choices=["worker", "web", "mobile", "agent-ui", "generic"])
+    s.add_argument("--no-cf", action="store_true", help="same as --cf off")
+    s.add_argument("--cf", default="auto", choices=["on", "off", "auto"],
+                   help="Code Factory gates: on, off, or auto (add what is installed); the choice is recorded")
+    s.add_argument("--target", default="generic",
+                   choices=["worker", "web", "mobile", "agent-ui", "api", "cli", "mcp", "generic"])
     s.set_defaults(fn=cmd_init)
     s = hs.add_parser("status"); s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_status)
     s = hs.add_parser("check"); s.add_argument("--gate", action="append"); s.add_argument("--json", action="store_true")
@@ -194,6 +307,8 @@ def register(sub) -> None:
     s.add_argument("--allow-drift", action="store_true", help="run gates even if protected files or the ledger changed")
     s.set_defaults(fn=cmd_check)
     s = hs.add_parser("heal"); s.add_argument("--repair-command"); s.add_argument("--max-attempts", type=int)
+    s.add_argument("--keep-partial", action="store_true",
+                   help="keep improving repairs even if the run ends unhealthy (default: restore the start state)")
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_heal)
     s = hs.add_parser("pass"); s.add_argument("feature"); s.set_defaults(fn=cmd_pass)
     s = hs.add_parser("add-feature"); s.add_argument("id"); s.add_argument("--description", required=True)
@@ -201,6 +316,12 @@ def register(sub) -> None:
     s.add_argument("--category", default="functional"); s.add_argument("--priority", type=int, default=100)
     s.set_defaults(fn=cmd_add_feature)
     s = hs.add_parser("seal", help="owner-approved re-seal after editing protected files (logged)")
-    s.add_argument("--reason", required=True); s.set_defaults(fn=cmd_seal)
+    s.add_argument("--reason", required=True); s.add_argument("--approver", required=True)
+    s.add_argument("--yes", action="store_true", help="confirm without a prompt (required when not on a terminal)")
+    s.set_defaults(fn=cmd_seal)
+    s = hs.add_parser("seed", help="seed gates and features from SpecLine plans / ForgeLine smoke manifests")
+    s.add_argument("--from", dest="source", default="all", choices=["specline", "forgeline", "all"])
+    s.add_argument("--feature", required=True); s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_seed)
     for parser in hs.choices.values():
         parser.add_argument("--root", default=".")
