@@ -73,6 +73,29 @@ hsf serve registry_store/my_workflow-*.py    # instant REST endpoint (pip instal
 hsf badge receipts/my_workflow-*.receipt.json  # evidence-owned SVG badge for your README
 ```
 
+## Self-healing app harness
+
+`hsf harness` scaffolds the harness an app (or a long-running coding agent) works inside. It follows
+current long-running harness designs: an initializer, a JSON feature ledger whose only writable field is
+`passes`, an append-only progress log, a session startup routine, end-to-end verification before a feature
+is marked done, and a bounded, scoped repair loop.
+
+```bash
+hsf harness init shop --target web     # harness.yaml, sealed ledger, init.sh, AGENTS.md, integrity locks
+hsf harness status                     # startup routine: ledger + protected-file integrity, next feature
+hsf harness check                      # run gates (parallel, input-digest cached, flake-aware)
+hsf harness heal --repair-command "my-agent fix"   # guarded repair loop, receipted
+hsf harness pass F001                  # marks a feature only after its own gates pass (never cached)
+```
+
+`heal` re-runs `init` for environment failures, then gives the external repair command a failure report
+(`HSF_FAILURE_REPORT`). It keeps a repair only when protected files (tests, goldens, specs, the ledger
+text and gate commands) are byte-identical, every change is inside the declared `mutable` paths, and no
+new gate starts failing. Otherwise the tree is restored exactly. It stops on oscillation or after
+`repair.max_attempts` (at most 5). HSF makes no model call here. When Code Factory is installed,
+`init` adds `forge qa` (blocking) and `factory scan` (advisory) gates and points the repair command at
+`factory wrap`, which records the agent run as an observed evidence session.
+
 ## Spec gallery
 
 `specs/` ships five domains — clinical prior-auth, refund review, content
