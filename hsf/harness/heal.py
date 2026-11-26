@@ -129,7 +129,8 @@ def _verify(root: Path, spec: HarnessSpec, *, use_cache: bool = True):
         digests = _digests(root, spec)
         runs = run_gates(spec.gates, root, parallel=spec.parallel_gates, env=env,
                          planner=planner_for(root, spec, digests),
-                         recorder=lambda gate, run: record_gate(root, gate.id, int(run.duration_s * 1000)))
+                         recorder=lambda gate, run: record_gate(root, gate.id, int(run.duration_s * 1000),
+                                                                summary=run.summary()))
     else:
         runs = run_gates(spec.gates, root, parallel=spec.parallel_gates, env=env,
                          use_cache=use_cache and spec.cache == "local")

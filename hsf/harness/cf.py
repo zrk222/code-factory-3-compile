@@ -117,6 +117,7 @@ def proof_manifest(root: Path, spec: HarnessSpec, digests: dict[str, str]) -> di
         inputs = sorted(path for path in digests if not path.endswith("/") and matches(path, gate.inputs))
         gates.append({"name": f"harness:{gate.id}", "command": ["sh", "-c", gate.run],
                       "inputs": inputs + ["harness/harness.yaml"],
+                      "outputs": [f"{GATE_RESULT_DIR}/{gate.id}.json"],
                       "toolchain": {"hsf": __version__, "python": platform.python_version()},
                       "environment": {"PYTHONDONTWRITEBYTECODE": "1"}, "read_only": gate.read_only,
                       "safe_to_skip": gate.safe_to_skip, "relevant_paths": gate.relevant_paths})
@@ -141,7 +142,22 @@ def plan_gates(root: Path, spec: HarnessSpec, digests: dict[str, str], changed: 
     return out
 
 
-def record_gate(root: Path, gate_id: str, elapsed_ms: int, *, run=subprocess.run, which=None) -> bool:
+GATE_RESULT_DIR = ".hsf-harness/gates"
+
+
+def write_gate_result(root: Path, gate_id: str, summary: dict) -> Path:
+    """The gate's declared proof output: its last green result, without the output tail."""
+    out = Path(root) / GATE_RESULT_DIR / f"{gate_id}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    kept = {key: value for key, value in summary.items() if key not in ("output_tail", "duration_s")}
+    out.write_text(json.dumps(kept, indent=2, sort_keys=True), encoding="utf-8")
+    return out
+
+
+def record_gate(root: Path, gate_id: str, elapsed_ms: int, *, run=subprocess.run, which=None,
+                summary: dict | None = None) -> bool:
+    """`factory proofs record` for one fresh green read-only gate; its result file is the declared output."""
+    write_gate_result(root, gate_id, summary or {"gate": gate_id, "passed": True, "classification": "ok"})
     result = _factory(["proofs", "record", PROOF_MANIFEST, "--gate", f"harness:{gate_id}", "--elapsed-ms",
                        str(max(0, elapsed_ms)), "--replace"], Path(root), 300, run, which)
     return result is not None and result.get("_exit_code") == 0

@@ -561,3 +561,22 @@ def test_seed_from_specline_and_forgeline_is_idempotent_and_protected(tmp_path, 
     spec = load_harness(app)
     assert "plans/**" in spec.protected and protected_drift(app, spec) == []
     assert not any(f.passes for f in Ledger(app / spec.features_path).verify())
+
+
+def test_proof_manifest_declares_a_gate_result_output_and_record_writes_it(tmp_path):
+    """factory proofs record refuses requests without outputs; each gate declares its result file."""
+    from hsf.harness import cf
+
+    class Gate:
+        id, run, inputs, read_only, safe_to_skip, relevant_paths = "unit", "pytest -q", ["src/**"], True, False, []
+
+    class Spec:
+        gates = [Gate()]
+
+    manifest = cf.proof_manifest(tmp_path, Spec(), {"src/a.py": "x"})
+    assert manifest["gates"][0]["outputs"] == [".hsf-harness/gates/unit.json"]
+    calls = []
+    ok = cf.record_gate(tmp_path, "unit", 120, run=lambda *a, **k: calls.append(a) or None, which=lambda _n: None,
+                        summary={"gate": "unit", "passed": True, "classification": "ok", "output_tail": "secret"})
+    written = (tmp_path / ".hsf-harness" / "gates" / "unit.json").read_text(encoding="utf-8")
+    assert '"passed": true' in written and "secret" not in written and ok is False
