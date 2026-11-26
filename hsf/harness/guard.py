@@ -20,6 +20,9 @@ HARNESS_WRITES = ("harness/progress.jsonl", "harness/receipts/**")
 # may not change (a .jsonl may only grow, keeping its old bytes as a prefix), and rollback never deletes them.
 EVIDENCE = (".factory/**", ".forge/**", ".specline/**", ".hsf/**", "receipts/**", "envelopes/**")
 CACHE_FILE = ".hsf-harness/gate-cache.json"
+# Files outside mutable/protected/evidence globs are copied into a repair snapshot only up to this budget; a
+# change to an uncopied file is reported as `rollback_incomplete` instead of silently surviving.
+SNAPSHOT_BUDGET = 64 * 1024 * 1024
 SUMMARY_PREFIX = "dir:"
 LINK_PREFIX = "link:"
 
@@ -169,19 +172,27 @@ def check(before: dict[str, str], after: dict[str, str], *, protected, mutable, 
 class Snapshot:
     """Byte copies of the digested files (symlinks recorded, not followed) so a rejected repair is restored."""
 
-    def __init__(self, root: Path, store: Path, digests: dict[str, str]):
+    def __init__(self, root: Path, store: Path, digests: dict[str, str], keep_globs=(),
+                 budget_bytes: int = SNAPSHOT_BUDGET):
         self.root, self.store, self.digests = Path(root), Path(store), dict(digests)
         if self.store.exists():
             shutil.rmtree(self.store)
         self.store.mkdir(parents=True)
         self.listings: dict[str, dict[str, tuple[int, int]]] = {}
         self.incomplete: list[str] = []
-        for rel, digest in self.digests.items():
+        self.uncopied: set[str] = set()
+        spent = 0
+        for rel, digest in sorted(self.digests.items(), key=lambda item: not matches(item[0], keep_globs)):
             if rel.endswith("/"):
                 self.listings[rel] = _listing(self.root / rel)
                 continue
             if digest.startswith(LINK_PREFIX):
                 continue
+            size = (self.root / rel).stat().st_size
+            if keep_globs and not matches(rel, keep_globs) and spent + size > budget_bytes:
+                self.uncopied.add(rel)
+                continue
+            spent += size
             target = self.store / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.root / rel, target)
@@ -211,6 +222,9 @@ class Snapshot:
             if matches(rel, HARNESS_WRITES):
                 continue
             if rel not in self.digests and matches(rel, EVIDENCE):
+                continue
+            if rel in self.uncopied:
+                self.incomplete.append(rel)
                 continue
             self._restore_one(rel)
             restored.append(rel)

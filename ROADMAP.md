@@ -25,6 +25,10 @@
 - `hsf harness`: self-healing app harness scaffolding (init, status, check, heal, pass, add-feature):
   sealed feature ledger, protected-file digest lock, parallel and input-cached gates, flake detection,
   failure classification, and a guarded, receipted, bounded repair loop with exact rollback.
+- Code Factory integration: `factory journey heal-verify` for kept repairs, `factory proofs` as the gate
+  cache, ledger seeding from SpecLine plans and ForgeLine smoke manifests.
+- CLI hygiene: one-line schema errors (`E_SPEC_SCHEMA`), `E_STATUS_UNDECLARED`, inclusive bounds,
+  escaped literals in compiled artifacts (`wf-2`), `--root`, `goldens-draft`, parallel G3 replays.
 
 ## v0.4 (help wanted)
 

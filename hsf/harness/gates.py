@@ -4,23 +4,29 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 
 from .spec import GateSpec
 
 TAIL_CHARS = 4000
+CACHE_PATH = ".hsf-harness/gate-cache.json"
 _ENVIRONMENT = re.compile(r"command not found|not recognized as an internal|No module named|ModuleNotFoundError|"
-                          r"Cannot find module|ECONNREFUSED|Connection refused|EADDRINUSE|ENOENT|"
-                          r"could not connect|No such file or directory", re.I)
+                          r"Cannot find module|ECONNREFUSED|Connection refused|EADDRINUSE|could not connect", re.I)
 _BUILD = re.compile(r"SyntaxError|IndentationError|TypeError: .* is not a function|error TS\d+|"
                     r"compilation failed|Build failed|cannot find symbol|ImportError", re.I)
 _VOLATILE = re.compile(r"\b0x[0-9a-f]+\b|\b\d+(\.\d+)?\s*(ms|s|sec|seconds)\b|\b\d{4}-\d{2}-\d{2}[T ][\d:.]+\S*|"
                        r"/tmp/[^\s:]+|line \d+|:\d+:\d+", re.I)
+_SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization|bearer)[\"']?\s*[:=]\s*"
+                     r"[\"']?)([^\s\"',;]{6,})|\b(gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,})\b")
+_BASE_ENV = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "SystemRoot", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
+             "COMSPEC", "PATHEXT", "VIRTUAL_ENV")
 
 
 @dataclass
@@ -41,21 +47,46 @@ class GateRun:
                 "signature": self.signature, "attempts": self.attempts, "output_tail": self.output_tail}
 
 
-def gate_env() -> dict:
-    """Gates judge the bytes on disk: no bytecode cache can stand in for a repaired source file."""
-    return dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+def redact(text: str) -> str:
+    """Mask obvious credentials before output reaches receipts or failure reports."""
+    return _SECRET.sub(lambda m: (m.group(1) + "***") if m.group(1) else "***", text)
 
 
-def _execute(gate: GateSpec, root: Path) -> tuple[int | None, str, float]:
-    started = time.monotonic()
+def gate_env(allow: list[str] | None = None) -> dict:
+    """Gates judge the bytes on disk: no bytecode cache can stand in for a repaired source file. With an
+    `env_allow` list, only a minimal base environment plus those names is passed through."""
+    if allow is None:
+        env = dict(os.environ)
+    else:
+        env = {name: os.environ[name] for name in (*_BASE_ENV, *allow) if name in os.environ}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
     try:
-        done = subprocess.run(gate.run, shell=True, cwd=root, capture_output=True, text=True, env=gate_env(),
-                              errors="replace", timeout=gate.timeout_s)
-        return done.returncode, (done.stdout + done.stderr)[-TAIL_CHARS:], time.monotonic() - started
-    except subprocess.TimeoutExpired as exc:
-        parts = [part.decode("utf-8", "replace") if isinstance(part, bytes) else (part or "")
-                 for part in (exc.stdout, exc.stderr)]
-        return None, "".join(parts)[-TAIL_CHARS:], time.monotonic() - started
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def run_command(command: str, root: Path, timeout_s: int, env: dict) -> tuple[int | None, str, float]:
+    """Run a shell command in its own process group; a timeout kills the whole group (dev servers, browsers)."""
+    started = time.monotonic()
+    extra = {"start_new_session": True} if os.name == "posix" else {
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    proc = subprocess.Popen(command, shell=True, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", env=env, **extra)
+    try:
+        out, _ = proc.communicate(timeout=timeout_s)
+        return proc.returncode, redact(out[-TAIL_CHARS:]), time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        out, _ = proc.communicate()
+        return None, redact((out or "")[-TAIL_CHARS:]), time.monotonic() - started
 
 
 def classify(exit_code: int | None, output: str) -> str:
@@ -73,11 +104,12 @@ def signature(gate_id: str, classification: str, output: str) -> str:
     return sha256("\n".join([gate_id, classification, *lines[-20:]]).encode("utf-8")).hexdigest()[:16]
 
 
-def run_gate(gate: GateSpec, root: Path) -> GateRun:
-    code, out, took = _execute(gate, root)
+def run_gate(gate: GateSpec, root: Path, env: dict | None = None) -> GateRun:
+    env = env or gate_env()
+    code, out, took = run_command(gate.run, root, gate.timeout_s, env)
     attempts = 1
-    while code != 0 and attempts <= gate.flake_retries:
-        retry_code, retry_out, retry_took = _execute(gate, root)
+    while code != 0 and attempts <= (gate.flake_retries or 0):
+        retry_code, retry_out, retry_took = run_command(gate.run, root, gate.timeout_s, env)
         attempts += 1
         took += retry_took
         if retry_code == 0:
@@ -89,23 +121,19 @@ def run_gate(gate: GateSpec, root: Path) -> GateRun:
     return GateRun(gate.id, gate.kind, False, code, took, out, kind, signature(gate.id, kind, out), attempts)
 
 
-CACHE_PATH = ".hsf-harness/gate-cache.json"
-
-
-def cache_key(gate: GateSpec, root: Path) -> str | None:
+def cache_key(gate: GateSpec, root: Path, digests: dict[str, str] | None = None) -> str | None:
     """Digest of the gate command plus every declared input file; None when the gate declares no inputs."""
     if not gate.inputs:
         return None
     from .guard import matches, tree_digests
-    files = {path: digest for path, digest in tree_digests(root).items() if matches(path, gate.inputs)}
-    blob = json.dumps({"run": gate.run, "files": files}, sort_keys=True)
-    return sha256(blob.encode("utf-8")).hexdigest()
+    digests = digests if digests is not None else tree_digests(root)
+    files = {path: digest for path, digest in digests.items() if matches(path, gate.inputs)}
+    return sha256(json.dumps({"run": gate.run, "files": files}, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _load_cache(root: Path) -> dict:
-    path = Path(root) / CACHE_PATH
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads((Path(root) / CACHE_PATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -116,26 +144,50 @@ def _save_cache(root: Path, cache: dict) -> None:
     path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _cached_or_run(gate: GateSpec, root: Path, cache: dict, use_cache: bool) -> tuple[GateRun, str | None]:
-    key = cache_key(gate, root) if use_cache else None
-    if key is not None and cache.get(gate.id) == key:
-        return GateRun(gate.id, gate.kind, True, 0, 0.0, "", "cached", "", 0), key
-    return run_gate(gate, root), key
+Planner = Callable[[], "dict[str, str] | None"]
+Recorder = Callable[[GateSpec, GateRun], object]
 
 
-def run_gates(gates, root: Path, only: list[str] | None = None, *, parallel: int = 1,
-              use_cache: bool = True) -> list[GateRun]:
-    """Run the selected gates (in parallel when asked), reusing a pass whose inputs are byte-identical."""
+def _planned(gate: GateSpec, plan: dict[str, str] | None) -> GateRun | None:
+    disposition = (plan or {}).get(gate.id)
+    if disposition == "REUSE":
+        return GateRun(gate.id, gate.kind, True, 0, 0.0, "", "reused", "", 0)
+    if disposition == "SKIP":
+        return GateRun(gate.id, gate.kind, True, 0, 0.0, "", "skipped", "", 0)
+    return None
+
+
+def run_gates(gates, root: Path, only: list[str] | None = None, *, parallel: int = 1, use_cache: bool = True,
+              env: dict | None = None, planner: Planner | None = None, recorder: Recorder | None = None,
+              digests: dict[str, str] | None = None) -> list[GateRun]:
+    """Run the selected gates (in parallel when asked). A pass whose inputs are byte-identical is reused from
+    the local cache, or from `factory proofs` when a planner is given."""
     selected = [gate for gate in gates if only is None or gate.id in only]
-    cache = _load_cache(root) if use_cache else {}
+    plan = planner() if planner else None
+    cache = _load_cache(root) if use_cache and planner is None else {}
+    if use_cache and planner is None and digests is None and any(gate.inputs for gate in selected):
+        from .guard import tree_digests
+        digests = tree_digests(root)
+
+    def one(gate: GateSpec) -> tuple[GateRun, str | None]:
+        planned = _planned(gate, plan)
+        if planned is not None:
+            return planned, None
+        key = cache_key(gate, root, digests) if use_cache and planner is None else None
+        if key is not None and cache.get(gate.id) == key:
+            return GateRun(gate.id, gate.kind, True, 0, 0.0, "", "cached", "", 0), key
+        return run_gate(gate, root, env), key
+
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(selected) or 1))) as pool:
-        results = list(pool.map(lambda gate: _cached_or_run(gate, root, cache, use_cache), selected))
+        results = list(pool.map(one, selected))
     for gate, (run, key) in zip(selected, results):
-        if key is not None and run.passed and run.classification != "flake":
+        if key is not None and run.passed and run.classification == "ok":
             cache[gate.id] = key
         elif not run.passed:
             cache.pop(gate.id, None)
-    if use_cache:
+        if recorder and gate.read_only and run.passed and run.classification == "ok" and run.attempts:
+            recorder(gate, run)
+    if use_cache and planner is None:
         _save_cache(root, cache)
     return [run for run, _ in results]
 

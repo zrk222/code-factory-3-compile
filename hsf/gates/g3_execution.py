@@ -4,7 +4,7 @@ Sandbox: separate process, empty env, CPU/AS rlimits, socket disabled
 before artifact import, cwd in a throwaway tmpdir, fixture extractor only.
 """
 from __future__ import annotations
-import json, subprocess, sys, tempfile, textwrap
+import json, subprocess, sys, tempfile, textwrap, time
 from pathlib import Path
 from .base import GateResult, Finding
 from .sandbox_env import minimal_env
@@ -71,17 +71,27 @@ def run(source: str, smoke_cases: list[dict], repeats: int = 3, *,
         runner = Path(td) / "runner.py"
         runner.write_text(RUNNER, encoding="utf-8")
         argv = [sys.executable, str(runner), str(art), str(fx), *(spec_identity or ())]
-        for i in range(repeats):
-            try:
-                proc = subprocess.run(argv,
-                                      capture_output=True, encoding="utf-8", env=minimal_env(), cwd=td, timeout=30)
-            except subprocess.TimeoutExpired:
-                findings.append(Finding("HSF-EXE-002", "critical", f"run {i+1} exceeded 30 seconds"))
-                break
-            if proc.returncode != 0:
-                findings.append(Finding("HSF-EXE-001", "critical", f"run {i+1} failed: {proc.stderr[-400:]}"))
-                break
-            outputs.append(proc.stdout.strip())
+        # Separate processes are what the determinism claim rests on; they start together and are judged in
+        # order, each against its own 30-second deadline.
+        started = time.monotonic()
+        procs = [subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+                                  env=minimal_env(), cwd=td) for _ in range(repeats)]
+        try:
+            for i, proc in enumerate(procs):
+                try:
+                    stdout, stderr = proc.communicate(timeout=max(0.1, started + 30 - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    findings.append(Finding("HSF-EXE-002", "critical", f"run {i+1} exceeded 30 seconds"))
+                    break
+                if proc.returncode != 0:
+                    findings.append(Finding("HSF-EXE-001", "critical", f"run {i+1} failed: {stderr[-400:]}"))
+                    break
+                outputs.append(stdout.strip())
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
     if not findings and len(set(outputs)) > 1:
         findings.append(Finding("HSF-DET-001", "critical", "nondeterministic output across identical runs"))
     evidence: dict[str, object] = {"repeats": repeats, "byte_identical": bool(outputs) and len(set(outputs)) == 1}

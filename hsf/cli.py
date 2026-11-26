@@ -10,6 +10,32 @@ def _die(message: str, code: int = 2) -> None:
     print(f"hsf: {message}", file=sys.stderr)
     raise SystemExit(code)
 
+_MISSING_HINTS = {
+    "spec": "Create one with `hsf init <name>` or check the path.",
+    "artifact": "Compile one with `hsf compile <spec>`, or list registry_store/.",
+    "receipt": "Compile with `hsf compile <spec>` to write a receipt under receipts/.",
+    "file": "Check the path, or run `hsf compile <spec>` to generate artifacts.",
+}
+_SPEC_NAME = __import__("re").compile(r"[a-z][a-z0-9_]*")
+
+
+def _suggest_name(name: str) -> str:
+    import re
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", name.strip().lower()).strip("_")
+    return cleaned if cleaned and cleaned[0].isalpha() else f"wf_{cleaned}".rstrip("_")
+
+
+def _compile_failure_hint(exc) -> str:
+    """Name the first failing gate and finding from the remediation evidence (H-UX-5)."""
+    for attempt in reversed(getattr(exc, "evidence", None) or []):
+        for result in attempt.get("results", []):
+            if not result.get("passed", True):
+                finding = (result.get("findings") or [{}])[0]
+                code = finding.get("code") if isinstance(finding, dict) else finding
+                return f" (gate {result.get('gate')} failed: {code or 'see evidence'}; rerun with --json for full evidence)"
+    return ""
+
+
 def _resolve_existing(path_or_glob: str, *, kind: str = "file") -> Path:
     path = Path(path_or_glob)
     if path.exists():
@@ -17,8 +43,7 @@ def _resolve_existing(path_or_glob: str, *, kind: str = "file") -> Path:
     matches = sorted(Path(p) for p in glob.glob(path_or_glob))
     if matches:
         return matches[-1]
-    hint = " Use Get-ChildItem/ls to inspect generated files, or run `hsf compile <spec>` first."
-    raise CliError(f"{kind} not found: {path_or_glob}.{hint}")
+    raise CliError(f"{kind} not found: {path_or_glob}. {_MISSING_HINTS.get(kind, _MISSING_HINTS['file'])}")
 
 def _load(spec_path):
     from hsf.spec import load_spec
@@ -29,6 +54,28 @@ def _goldens_for(spec_id: str, root: Path | None = None) -> list[dict]:
     if not p.exists():
         raise CliError(f"goldens not found for spec_id={spec_id!r}: {p}")
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+def _rooted(path: str, root: str | None) -> Path:
+    """Resolve a relative output path against --root (H-CON-1); without --root keep today's cwd behaviour."""
+    candidate = Path(path)
+    return candidate if root is None or candidate.is_absolute() else Path(root) / candidate
+
+
+def cmd_goldens_draft(args):
+    """Draft golden inputs (never expected answers): one row per rule plus one out-of-bounds row (H-AUT-1)."""
+    from hsf.goldens_draft import draft_cases
+    spec_path = _resolve_existing(args.spec, kind="spec").resolve()
+    spec, _ = _load(str(spec_path))
+    root = Path(args.root).resolve() if args.root else spec_path.parent.parent
+    out = root / "goldens" / spec.workflow_spec / "cases.draft.jsonl"
+    if out.exists() and not args.force:
+        raise CliError(f"{out} exists; review it or pass --force")
+    rows = draft_cases(spec)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    print(f"drafted {len(rows)} case(s): {out}")
+    print("fill every `expected`, then save the reviewed file as cases.jsonl; compile ignores the draft")
+
 
 def _json_arg(raw: str, *, name: str) -> dict:
     if not raw:
@@ -49,6 +96,8 @@ def _schema_of(spec) -> dict:
                 d = {"type": fs.type}
                 if fs.min is not None: d["min"] = fs.min
                 if fs.max is not None: d["max"] = fs.max
+                if fs.min_inclusive: d["min_inclusive"] = True
+                if fs.max_inclusive: d["max_inclusive"] = True
                 out[k] = d
     return out
 
@@ -63,7 +112,7 @@ def cmd_compile(args):
     from hsf.spec import load_spec
     spec_path = _resolve_existing(args.spec, kind="spec").resolve()
     spec, sha = load_spec(spec_path, expected_file_sha256=args.expected_spec_file_sha256)
-    root = spec_path.parent.parent
+    root = Path(args.root).resolve() if args.root else spec_path.parent.parent
     goldens = _goldens_for(spec.workflow_spec, root)
     if not goldens:
         raise CliError("compile requires reviewed golden cases")
@@ -87,12 +136,12 @@ def cmd_compile(args):
         raise CliError("the candidate lacks a complete passing gate sequence")
     signing = {"signing_key": Path(args.signing_key)} if args.signing_key else {}
     try:
-        path, art_sha = store_artifact(src, Path(args.registry), spec.workflow_spec, **signing)
+        path, art_sha = store_artifact(src, _rooted(args.registry, args.root), spec.workflow_spec, **signing)
     except RegistryError as exc:
         raise CliError(str(exc)) from exc
     if args.expected_spec_file_sha256 is not None:
         meta["spec_file_sha256"] = args.expected_spec_file_sha256
-    receipt = write_receipt(Path("receipts"), spec_id=spec.workflow_spec, spec_sha=sha,
+    receipt = write_receipt(_rooted("receipts", args.root), spec_id=spec.workflow_spec, spec_sha=sha,
                             artifact_sha=art_sha, compile_meta=meta, results=results, shipped=passed)
     if args.json:
         print(json.dumps({"shipped": passed, "artifact": str(path), "artifact_sha256": art_sha,
@@ -123,13 +172,18 @@ def cmd_goldens(args):
     from hsf.gates.g4_accuracy import run as g4
     artifact = _resolve_existing(args.artifact, kind="artifact")
     src = artifact.read_text(encoding="utf-8")
-    r = g4(src, _goldens_for(args.spec_id))
+    r = g4(src, _goldens_for(args.spec_id, Path(args.root) if args.root else None))
     print(json.dumps(r.evidence, indent=2))
     sys.exit(0 if r.passed else 1)
 
 def cmd_init(args):
     from hsf.scaffold import init_workflow
-    paths = init_workflow(args.name)
+    if not _SPEC_NAME.fullmatch(args.name):
+        raise CliError(f"workflow name {args.name!r} must be snake_case ([a-z][a-z0-9_]*); try {_suggest_name(args.name)!r}")
+    try:
+        paths = init_workflow(args.name)
+    except FileExistsError as exc:
+        raise CliError(f"{exc}; choose another name or edit the existing spec") from exc
     print("created:\n  " + "\n  ".join(str(x) for x in paths))
     print(f"next: hsf compile specs/{args.name}.yaml")
 
@@ -159,7 +213,7 @@ def cmd_aku(args):
         print(json.dumps(validation, indent=2))
         sys.exit(1)
     aku = export_aku(spec, sha, receipt_path=receipt)
-    out = args.output or f"{spec.workflow_spec}.aku.json"
+    out = args.output or str(_rooted(f"{spec.workflow_spec}.aku.json", args.root))
     path = write_aku(aku, out)
     print(path)
 
@@ -178,7 +232,7 @@ def cmd_meter(args):
 def cmd_challenge(args):
     from hsf.challenge import challenge_spec
     spec_path = _resolve_existing(args.spec, kind="spec")
-    root = spec_path.resolve().parent.parent
+    root = Path(args.root).resolve() if args.root else spec_path.resolve().parent.parent
     spec, _ = _load(args.spec)
     golden_path = root / "goldens" / spec.workflow_spec / "cases.jsonl"
     payload = challenge_spec(spec_path, golden_path)
@@ -205,6 +259,8 @@ def main(argv=None):
     s.add_argument("--remediation", choices=["template-fallback", "off"], default="template-fallback")
     s.add_argument("--json", action="store_true", help="emit the artifact and gate receipt as JSON")
     s.add_argument("--registry", default="registry_store"); s.set_defaults(fn=cmd_compile)
+    s.add_argument("--root", help="project root for goldens, registry and receipts (default: the spec's grandparent "
+                   "for goldens and the current directory for outputs)")
     s.add_argument("--signing-key", help="Ed25519 private-key file; omitted uses legacy local HMAC")
     s = sub.add_parser("run"); s.add_argument("artifact"); s.add_argument("--text", default="")
     s.add_argument("--extracted", default=""); s.set_defaults(fn=cmd_run)
@@ -212,6 +268,10 @@ def main(argv=None):
     s.add_argument("--expected-sha", help="expected full artifact SHA-256")
     s.add_argument("--structured-only", action="store_true", help="validate structured fields without a model provider; requires pinned public key")
     s = sub.add_parser("goldens"); s.add_argument("artifact"); s.add_argument("spec_id"); s.set_defaults(fn=cmd_goldens)
+    s.add_argument("--root", help="project root that holds goldens/")
+    s = sub.add_parser("goldens-draft", help="draft golden inputs for review (expected answers are left null)")
+    s.add_argument("spec"); s.add_argument("--root"); s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_goldens_draft)
     s = sub.add_parser("init"); s.add_argument("name"); s.set_defaults(fn=cmd_init)
     s = sub.add_parser("demo"); s.set_defaults(fn=cmd_demo)
     s = sub.add_parser("serve"); s.add_argument("artifact")
@@ -222,11 +282,13 @@ def main(argv=None):
     s.add_argument("--receipt", default=None)
     s.add_argument("-o", "--output", default=None)
     s.add_argument("--require-autonomous", action="store_true")
+    s.add_argument("--root", help="directory for the default AKU output")
     s.set_defaults(fn=cmd_aku)
     s = sub.add_parser("topology"); s.add_argument("manifest"); s.set_defaults(fn=cmd_topology)
     s = sub.add_parser("bench"); s.add_argument("--compile-tokens", type=int, default=34000); s.set_defaults(fn=cmd_bench)
     s = sub.add_parser("meter"); s.add_argument("--max-tokens", type=int, default=32000); s.set_defaults(fn=cmd_meter)
     s = sub.add_parser("challenge"); s.add_argument("spec"); s.add_argument("-o", "--output", default=None); s.set_defaults(fn=cmd_challenge)
+    s.add_argument("--root", help="project root that holds goldens/ and .hsf/")
     s = sub.add_parser("version"); s.add_argument("--json", action="store_true")
     from hsf.harness.cli import register as _register_harness
     _register_harness(sub)
@@ -241,11 +303,13 @@ def main(argv=None):
         if args.cmd == "harness" and rc:
             raise SystemExit(rc)
     except (ValueError, OSError, RuntimeError, KeyError) as exc:
-        if args.cmd == "harness":
-            _die(str(exc))
+        from hsf.spec import SpecError
+        if args.cmd == "harness" or isinstance(exc, SpecError):
+            if not (args.cmd == "compile" and getattr(args, "json", False)):
+                _die(str(exc))
         if isinstance(exc, KeyError):
             raise
-        if args.cmd != "compile" and not isinstance(exc, CliError):
+        if args.cmd != "compile" and not isinstance(exc, (CliError, SpecError)):
             raise
         if args.cmd == "compile" and args.json:
             result = {"shipped": False, "error": {"code": getattr(exc, "code", "E_COMPILE"),
@@ -254,7 +318,7 @@ def main(argv=None):
                 result["remediation_attempts"] = exc.evidence
             print(json.dumps(result))
             raise SystemExit(2) from None
-        _die(str(exc))
+        _die(str(exc) + (_compile_failure_hint(exc) if args.cmd == "compile" else ""))
 
 if __name__ == "__main__":
     main()

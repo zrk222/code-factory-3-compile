@@ -10,6 +10,9 @@ class FieldSpec(BaseModel):
     type: Literal["boolean", "float", "int", "string"]
     min: Optional[Number] = None
     max: Optional[Number] = None
+    # Bounds are exclusive by default (value must lie strictly inside); set these to accept the bound itself.
+    min_inclusive: bool = False
+    max_inclusive: bool = False
 
 class BranchRule(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)

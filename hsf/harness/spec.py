@@ -5,10 +5,14 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 GateKind = Literal["lint", "type", "unit", "e2e", "golden", "build", "custom"]
 MAX_REPAIR_ATTEMPTS = 5
+
+
+# Nondeterminism is a failure for these kinds, so they are never retried unless the spec says so (HH-8).
+NO_RETRY_KINDS = frozenset({"golden", "build", "type", "lint"})
 
 
 class GateSpec(BaseModel):
@@ -18,8 +22,18 @@ class GateSpec(BaseModel):
     kind: GateKind = "custom"
     timeout_s: int = Field(default=600, ge=1, le=7200)
     required: bool = True
-    flake_retries: int = Field(default=1, ge=0, le=3)
+    flake_retries: int | None = Field(default=None, ge=0, le=3)
     inputs: list[str] = Field(default_factory=list)
+    # Proof reuse through `factory proofs plan` (cache: factory-proofs).
+    read_only: bool = False
+    safe_to_skip: bool = False
+    relevant_paths: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _default_retries(self) -> "GateSpec":
+        if self.flake_retries is None:
+            self.flake_retries = 0 if self.kind in NO_RETRY_KINDS else 1
+        return self
 
 
 class RepairPolicy(BaseModel):
@@ -28,13 +42,16 @@ class RepairPolicy(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=MAX_REPAIR_ATTEMPTS)
     timeout_s: int = Field(default=1800, ge=1, le=14400)
     reinit_on_environment_failure: bool = True
+    # Route every kept repair through `factory journey heal-verify`; fails closed when factory is absent.
+    verify_with: Literal["none", "factory-journey"] = "none"
 
 
 class HarnessSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str = Field(pattern=r"^[A-Za-z][\w.-]{0,63}$")
     version: Literal[1] = 1
-    target: Literal["worker", "web", "mobile", "agent-ui", "generic"] = "generic"
+    target: Literal["worker", "web", "mobile", "agent-ui", "api", "cli", "mcp", "generic"] = "generic"
+    code_factory: Literal["on", "off", "auto"] = "auto"
     init: list[str] = Field(default_factory=list)
     gates: list[GateSpec] = Field(min_length=1)
     protected: list[str] = Field(default_factory=lambda: [
@@ -48,6 +65,9 @@ class HarnessSpec(BaseModel):
     progress_path: str = "harness/progress.jsonl"
     receipts_dir: str = "harness/receipts"
     parallel_gates: int = Field(default=1, ge=1, le=16)
+    cache: Literal["local", "factory-proofs", "off"] = "local"
+    # Extra environment variables passed to gates and repairs; by default they inherit the caller's environment.
+    env_allow: list[str] | None = None
 
     @field_validator("gates")
     @classmethod

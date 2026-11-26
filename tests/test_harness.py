@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -221,7 +222,10 @@ def test_code_factory_gates_are_added_only_when_installed(tmp_path):
     ids = [gate["id"] for gate in available_cf_gates(lambda tool: f"/usr/bin/{tool}")]
     assert ids == ["cf-quality", "cf-scan"]
     gates = {gate["id"]: gate for gate in available_cf_gates(lambda tool: "/x")}
-    assert gates["cf-quality"]["required"] is True and gates["cf-scan"]["required"] is False
+    assert gates["cf-quality"]["required"] is False and gates["cf-scan"]["required"] is False
+    scoped = {g["id"]: g for g in available_cf_gates(lambda tool: "/x", feature="shop", ssat="shop.ssat.yaml")}
+    assert scoped["cf-quality"]["required"] is True and "--ssat shop.ssat.yaml" in scoped["cf-quality"]["run"]
+    assert available_cf_gates(lambda tool: None, mode="on") and available_cf_gates(lambda tool: "/x", mode="off") == []
     assert "factory wrap" in (init_harness("app", tmp_path, with_cf=True) and (tmp_path / "AGENTS.md").read_text())
 
 
@@ -230,10 +234,11 @@ def test_cli_seal_records_owner_edits(tmp_path):
     spec_file = app / "harness" / "harness.yaml"
     spec_file.write_text(spec_file.read_text() + "\n")
     assert protected_drift(app, load_harness(app)) == ["harness/harness.yaml"]
-    main(["harness", "seal", "--reason", "configure gates", "--root", str(app)])
+    main(["harness", "seal", "--reason", "configure gates", "--approver", "owner", "--yes", "--root", str(app)])
     assert protected_drift(app, load_harness(app)) == []
     last = json.loads((app / "harness" / "progress.jsonl").read_text().splitlines()[-1])
     assert last["event"] == "seal" and last["files"] == ["harness/harness.yaml"] and last["reason"] == "configure gates"
+    assert last["approver"] == "owner"
 
 
 # --- Hardening: each test reproduces a reported way to weaken the oracle unnoticed. ---
@@ -379,3 +384,180 @@ def test_harness_import_is_lazy():
     code = ("import sys, hsf.harness.cli; "
             "sys.exit(int(any(m in sys.modules for m in ('hsf.harness.spec', 'hsf.harness.ledger', 'pydantic'))))")
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+
+
+# --- HS-5 / HS-6: remaining audit items ---
+
+def _fake_factory(tmp_path: Path, monkeypatch, body: str) -> Path:
+    """A `factory` executable on PATH that runs `body` (Python) with argv in `args`."""
+    if os.name != "posix":
+        pytest.skip("fake executables need POSIX")
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    exe = bindir / "factory"
+    log = tmp_path / "factory-calls.jsonl"
+    exe.write_text(f"#!{sys.executable}\nimport json, sys\nargs = sys.argv[1:]\n"
+                   f"open({str(log)!r}, 'a').write(json.dumps(args) + '\\n')\n{body}\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+def test_flake_retries_default_to_zero_for_deterministic_kinds():
+    assert GateSpec(id="g", run="x", kind="golden").flake_retries == 0
+    assert GateSpec(id="g", run="x", kind="lint").flake_retries == 0
+    assert GateSpec(id="g", run="x", kind="e2e").flake_retries == 1
+
+
+def test_gate_timeout_kills_the_whole_process_group(tmp_path):
+    if os.name != "posix":
+        pytest.skip("process groups are POSIX")
+    pidfile = tmp_path / "child.pid"
+    gate = GateSpec(id="hang", kind="e2e", timeout_s=1, flake_retries=0,
+                    run=f"sleep 30 & echo $! > {pidfile}; wait")
+    run = run_gate(gate, tmp_path)
+    assert run.classification == "timeout"
+    import time
+    time.sleep(0.2)
+    pid = int(pidfile.read_text())
+    stat = Path(f"/proc/{pid}/stat")
+    # Gone, or a zombie awaiting reaping: either way it is no longer running.
+    assert not stat.exists() or stat.read_text().split(") ", 1)[1].split()[0] in ("Z", "X")
+
+
+def test_secrets_are_redacted_from_gate_output(tmp_path):
+    gate = GateSpec(id="leak", kind="unit", flake_retries=0,
+                    run=PY + " -c \"print('api_key=abcdef123456 ghp_' + 'a' * 30); raise SystemExit(1)\"")
+    run = run_gate(gate, tmp_path)
+    assert "abcdef123456" not in run.output_tail and "ghp_aaaa" not in run.output_tail and "***" in run.output_tail
+
+
+def test_receipts_are_unique_v2_and_the_progress_log_is_chained(tmp_path):
+    from hsf.harness.heal import verify_progress_chain
+    app = _app(tmp_path, source=FIXED)
+    spec = load_harness(app)
+    first, second = heal(app, spec), heal(app, spec)
+    assert first["path"] != second["path"] and first["schema"] == "hsf.harness-heal.v2"
+    assert first["harness_sha256"] and first["protected_lock_sha256"] and first["tool"]["package"]
+    assert verify_progress_chain(app, spec) == []
+    log = app / "harness" / "progress.jsonl"
+    lines = log.read_text().splitlines()
+    lines[0] = lines[0].replace("healthy", "HEALTHY")
+    log.write_text("\n".join(lines) + "\n")
+    assert verify_progress_chain(app, spec) == [2]
+
+
+def test_unhealthy_run_restores_the_start_state_unless_keep_partial(tmp_path):
+    app = _app(tmp_path)
+    spec_file = app / "harness" / "harness.yaml"
+    payload = yaml.safe_load(spec_file.read_text())
+    payload["gates"].append({"id": "never", "kind": "unit", "run": PY + " -c \"raise SystemExit(1)\"", "flake_retries": 0})
+    spec_file.write_text(yaml.safe_dump(payload))
+    from hsf.harness.scaffold import seal_protected
+    seal_protected(app, load_harness(app))
+    spec = load_harness(app)
+    spec.repair.command = _writer(tmp_path, "half", "src/calc.py", FIXED)
+    spec.repair.max_attempts = 1
+    reverted = heal(app, spec)
+    assert reverted["status"] == "unhealthy" and reverted["rounds"][1]["action"] == "keep"
+    assert "src/calc.py" in reverted["reverted_to_start"] and (app / "src" / "calc.py").read_text() == BUGGY
+    kept = heal(app, spec, keep_partial=True)
+    assert kept["reverted_to_start"] == [] and (app / "src" / "calc.py").read_text() == FIXED
+
+
+def test_agent_rules_are_a_block_in_an_existing_agents_md(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# Project rules\nKeep it tidy.\n")
+    init_harness("svc", tmp_path, target="api", with_cf=False)
+    text = (tmp_path / "AGENTS.md").read_text()
+    assert text.startswith("# Project rules") and "<!-- hsf-harness:start -->" in text and "weaken tests" in text
+    from hsf.harness.scaffold import write_agent_rules
+    write_agent_rules(tmp_path, "svc")
+    assert (tmp_path / "AGENTS.md").read_text().count("<!-- hsf-harness:start -->") == 1
+
+
+def test_init_refuses_gates_whose_npm_script_is_missing(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"lint": "eslint ."}}))
+    with pytest.raises(ValueError, match="'test' script"):
+        init_harness("shop", tmp_path, target="web", with_cf=False)
+
+
+def test_check_resets_a_regressed_feature_and_reports_attribution(tmp_path, capsys):
+    app = _app(tmp_path, source=FIXED)
+    root = ["--root", str(app)]
+    main(["harness", "pass", "F001", *root])
+    (app / "src" / "calc.py").write_text(BUGGY)
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main(["harness", "check", "--json", "--no-cache", *root])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["regressed_features"] == ["F001"]
+    assert payload["attribution"]["units"][0]["failure_class"] == "wrong_output"
+    assert not Ledger(app / "harness" / "features.json").verify()[0].passes
+
+
+def test_heal_verify_gates_kept_repairs(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    spec = load_harness(app)
+    spec.repair.command = _writer(tmp_path, "fix", "src/calc.py", FIXED)
+    spec.repair.verify_with = "factory-journey"
+    _fake_factory(tmp_path, monkeypatch, "print(json.dumps({'decision': 'passed', 'receipt_sha256': 'x'}))")
+    accepted = heal(app, spec)
+    assert accepted["status"] == "healthy" and accepted["rounds"][1]["heal_verify"]["decision"] == "passed"
+    healing = json.loads(next((app / ".hsf-harness").glob("healing-*.json")).read_text())
+    assert set(healing) == {"schema", "healing_id", "review_mode", "agent", "patch", "allowed_paths",
+                            "semantic_identity", "coverage_before", "coverage_after", "positive_argv",
+                            "negative_argv"}
+    (app / "src" / "calc.py").write_text(BUGGY)
+    _fake_factory(tmp_path, monkeypatch, "print(json.dumps({'decision': 'rejected'}))")
+    rejected = heal(app, spec)
+    assert rejected["rounds"][1]["action"] == "rollback:heal_verify" and (app / "src" / "calc.py").read_text() == BUGGY
+
+
+def test_heal_verify_fails_closed_without_factory(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    spec = load_harness(app)
+    spec.repair.command = _writer(tmp_path, "fix", "src/calc.py", FIXED)
+    spec.repair.verify_with = "factory-journey"
+    monkeypatch.setattr("hsf.harness.cf.shutil.which", lambda tool: None)
+    receipt = heal(app, spec)
+    assert receipt["rounds"][1]["action"] == "rollback:verifier_unavailable"
+
+
+def test_factory_proofs_plan_reuses_without_running(tmp_path, monkeypatch):
+    from hsf.harness.cf import plan_gates
+    counter = tmp_path / "ran"
+    gate = GateSpec(id="unit", kind="unit", flake_retries=0, inputs=["src/**"], read_only=True,
+                    run=PY + f" -c \"open(r'{counter}', 'a').write('x')\"")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1\n")
+    log = _fake_factory(tmp_path, monkeypatch, (
+        "disp = 'REUSE' if args[:2] == ['proofs', 'plan'] else 'RUN'\n"
+        "print(json.dumps({'items': [{'gate': 'harness:unit', 'disposition': disp}]}))"))
+    from hsf.harness.spec import HarnessSpec
+    spec = HarnessSpec(harness="h", gates=[gate], mutable=["src/**"], cache="factory-proofs")
+    runs = run_gates(spec.gates, tmp_path, planner=lambda: plan_gates(tmp_path, spec, {"src/a.py": "d"}))
+    assert runs[0].classification == "reused" and not counter.exists()
+    assert json.loads(log.read_text().splitlines()[0])[:2] == ["proofs", "plan"]
+    monkeypatch.setattr("hsf.harness.cf.shutil.which", lambda tool: None)
+    runs = run_gates(spec.gates, tmp_path, planner=lambda: plan_gates(tmp_path, spec, {}))
+    assert runs[0].classification == "ok" and counter.exists()
+
+
+def test_seed_from_specline_and_forgeline_is_idempotent_and_protected(tmp_path, capsys):
+    app = _app(tmp_path, source=FIXED)
+    (app / "plans").mkdir()
+    (app / "plans" / "shop.md").write_text(
+        "- [ ] T1 | slice=api | files=src/calc.py | verify=`python -c pass` | add numbers\n"
+        "- [ ] T2 | slice=api | files=src/calc.py | verify=`python -c pass` | subtract numbers\n")
+    (app / "smoke").mkdir()
+    (app / "smoke" / "shop.json").write_text(json.dumps({"checks": [{"name": "adds two numbers"}]}))
+    root = ["--root", str(app)]
+    main(["harness", "seed", "--feature", "shop", "--json", *root])
+    first = json.loads(capsys.readouterr().out)
+    assert first["gates_added"] == ["sl-shop-t1", "sl-shop-t2", "forge-smoke-shop"]
+    assert first["features_added"] == ["shop.T1", "shop.T2", "shop.smoke.adds-two-numbers"]
+    main(["harness", "seed", "--feature", "shop", "--json", *root])
+    assert json.loads(capsys.readouterr().out)["gates_added"] == []
+    spec = load_harness(app)
+    assert "plans/**" in spec.protected and protected_drift(app, spec) == []
+    assert not any(f.passes for f in Ledger(app / spec.features_path).verify())

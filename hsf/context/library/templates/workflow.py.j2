@@ -24,14 +24,14 @@ class {{ class_name }}:
         # PHASE 2: deterministic bounds validation (compiled from schema min/max)
 {% for guard in bounds_guards %}
         if not ({{ guard.expr }}):
-            return await ctx.out_of_bounds("{{ guard.message }}", trace="{{ guard.trace }}", policy="{{ oob_policy }}")
+            return await ctx.out_of_bounds({{ guard.message | tojson }}, trace={{ guard.trace | tojson }}, policy={{ oob_policy | tojson }})
 {% endfor %}
         # PHASE 3: deterministic decision (compiled from branch rules, order-preserving)
 {% for rule in decision_rules %}
 {% if rule.cond %}
         if {{ rule.cond }}:  # trace={{ rule.trace }}
-            return AuthResult("{{ rule.status }}", "{{ rule.reason }}")
+            return AuthResult({{ rule.status | tojson }}, {{ rule.reason | tojson }})
 {% else %}
-        return AuthResult("{{ rule.status }}", "{{ rule.reason }}")  # trace={{ rule.trace }}
+        return AuthResult({{ rule.status | tojson }}, {{ rule.reason | tojson }})  # trace={{ rule.trace }}
 {% endif %}
 {% endfor %}
